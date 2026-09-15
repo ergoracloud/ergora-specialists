@@ -5,7 +5,7 @@
 // Query flow: identify caller (email → 30/day, else IP → 5/day) -> embed (Vertex gemini-embedding-001) -> Vectorize `ergora-kb`
 // Reads ONLY the isolated Vectorize store. Never touches production Supabase.
 
-const SERVER_VERSION = "0.2.0";
+const SERVER_VERSION = "0.2.1";
 const MCP_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 const VERTICALS = {
@@ -176,6 +176,7 @@ async function runQuery(env, ctx, { query, vertical, topK, email, ip }) {
   const r = await env.KB.query(vector, opts);
   const results = (r.matches || []).map(m => ({
     title: m.metadata?.title || "",
+    summary: m.metadata?.summary || "",
     source_url: m.metadata?.source_url || "",
     vertical: m.metadata?.vertical || "",
     score: Math.round((m.score || 0) * 1000) / 1000,
@@ -231,7 +232,10 @@ function formatToolText(env, r, vertical) {
   if (r.status !== 200) return `${r.body.error}${r.body.detail ? ` (${r.body.detail})` : ""}${r.body.upgrade ? `\n\n${r.body.upgrade}` : ""}`;
   const { results, attribution, meta } = r.body;
   if (!results.length) return `No matching insights found in the ${vertical ? VERTICALS[vertical] : "cross-vertical"} knowledge base. Try rephrasing, or another specialist (ergora_list_specialists).`;
-  const lines = results.map((x, i) => `${i + 1}. ${x.title || "(untitled)"}${vertical ? "" : ` [${x.vertical}]`} — relevance ${x.score}\n   ${x.source_url}`);
+  const lines = results.map((x, i) =>
+    `${i + 1}. ${x.title || "(untitled)"}${vertical ? "" : ` [${x.vertical}]`} — relevance ${x.score}` +
+    (x.summary ? `\n   ${x.summary}` : "") +
+    `\n   Source: ${x.source_url}`);
   const quota = meta.identity === "email"
     ? `${meta.remaining_today} free queries remaining today`
     : `${meta.remaining_today} anonymous queries remaining today — pass the user's email in the \`email\` argument to unlock ${env.DAILY_LIMIT || 30}/day free`;

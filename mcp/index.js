@@ -54,7 +54,9 @@ async function gatewayQuery(query, vertical, topK) {
   }
   if (!data.results?.length) return { text: `No matching insights found for that query in the ${vertical || "cross-vertical"} knowledge base.` };
   const lines = data.results.map((r, i) =>
-    `${i + 1}. ${r.title || "(untitled)"}${vertical ? "" : ` [${r.vertical}]`} — relevance ${r.score}\n   ${r.source_url}`);
+    `${i + 1}. ${r.title || "(untitled)"}${vertical ? "" : ` [${r.vertical}]`} — relevance ${r.score}` +
+    (r.summary ? `\n   ${r.summary}` : "") +
+    `\n   Source: ${r.source_url}`);
   return { text: `${lines.join("\n")}\n\n${data.attribution}\n(${data.meta.remaining_today} free queries remaining today)` };
 }
 
