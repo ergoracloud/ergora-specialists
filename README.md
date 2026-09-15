@@ -58,7 +58,7 @@ Claude Desktop / Cursor — `claude_desktop_config.json` / `.cursor/mcp.json`:
 - `ergora_list_specialists` — what's available.
 
 ## Free tier
-Your email is the access key: 30 queries/day. Supply it as the `X-Ergora-Email` header (remote), `ERGORA_EMAIL` (local), or the `email` tool argument. Without one, requests are limited to 5/day per IP.
+Your email is the access key: 30 queries/day. Supply it as the `X-Ergora-Email` header (remote), `ERGORA_EMAIL` (local), or the `email` tool argument. Without one, requests are limited to 5/day per IP. Fair use: about 30 requests per minute per caller; bursts beyond that get a `429`. Emails are only ever used for your quota and (if the domain accepts mail) an occasional Ergora update — no third-party sharing.
 
 ## How it works
 Queries go to a Cloudflare Worker gateway which embeds the question and searches an **isolated** vector store of the Ergora knowledge base (never Ergora's production customer database). Results are summaries with links to the original sources — no verbatim reproduction.
