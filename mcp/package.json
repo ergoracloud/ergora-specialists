@@ -1,6 +1,7 @@
 {
   "name": "ergora-specialists-mcp",
-  "version": "0.1.0",
+  "version": "0.3.1",
+  "mcpName": "io.github.ergoracloud/ergora-specialists",
   "description": "Ergora Specialists — 17 business-vertical knowledge specialists (sales, marketing, ads, ecommerce, finance, HR, legal, PR...) as MCP tools for Claude, Cursor and any MCP client.",
   "type": "module",
   "bin": { "ergora-specialists-mcp": "index.js" },

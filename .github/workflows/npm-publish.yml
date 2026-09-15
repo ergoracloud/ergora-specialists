@@ -33,8 +33,8 @@ jobs:
       - name: Install (lockfile)
         run: npm ci --omit=dev
 
-      - name: Smoke-test the stdio server against the live gateway
-        run: node --check index.js
+      - name: Syntax check + ship the repo README with the package
+        run: node --check index.js && cp ../README.md ./README.md
 
       - name: Publish
         run: npm publish

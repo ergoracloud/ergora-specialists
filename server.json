@@ -3,12 +3,29 @@
   "name": "io.github.ergoracloud/ergora-specialists",
   "title": "Ergora Specialists",
   "description": "17 business specialists — sales, marketing, ads, ecommerce, finance, HR, legal, PR… Cited insights.",
-  "version": "0.2.1",
+  "version": "0.3.1",
   "websiteUrl": "https://ergora.app",
   "repository": {
     "url": "https://github.com/ergoracloud/ergora-specialists",
     "source": "github"
   },
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "ergora-specialists-mcp",
+      "version": "0.3.1",
+      "transport": { "type": "stdio" },
+      "environmentVariables": [
+        {
+          "name": "ERGORA_EMAIL",
+          "description": "Your email — the free-tier access key (30 queries/day).",
+          "isRequired": true,
+          "isSecret": false,
+          "format": "string"
+        }
+      ]
+    }
+  ],
   "remotes": [
     {
       "type": "streamable-http",

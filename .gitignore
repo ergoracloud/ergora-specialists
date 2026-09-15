@@ -1,4 +1,6 @@
 node_modules/
+# mcp/README.md is copied from the repo root at publish time (single source of truth)
+mcp/README.md
 .wrangler/
 .dev.vars
 *.log

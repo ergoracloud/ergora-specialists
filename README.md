@@ -31,12 +31,13 @@ claude mcp add --transport http ergora-specialists https://ergora-specialists-ga
 
 **Any other MCP client** — point it at the URL with the Streamable HTTP transport. The server is stateless (POST-only, JSON responses). The optional `X-Ergora-Email` header identifies you for the 30/day free tier.
 
-## Install — local stdio server (from source)
+## Install — local stdio server (npm)
 
-Needs Node 18+.
+Package: [`ergora-specialists-mcp`](https://www.npmjs.com/package/ergora-specialists-mcp) (Node 18+).
+
+**Claude Code**
 ```bash
-git clone https://github.com/ergoracloud/ergora-specialists && cd ergora-specialists/mcp && npm install
-claude mcp add ergora-specialists -e ERGORA_EMAIL=you@company.com -- node "$PWD/index.js"
+claude mcp add ergora-specialists -e ERGORA_EMAIL=you@company.com -- npx -y ergora-specialists-mcp
 ```
 
 Claude Desktop / Cursor — `claude_desktop_config.json` / `.cursor/mcp.json`:
@@ -44,13 +45,15 @@ Claude Desktop / Cursor — `claude_desktop_config.json` / `.cursor/mcp.json`:
 {
   "mcpServers": {
     "ergora-specialists": {
-      "command": "node",
-      "args": ["/absolute/path/to/ergora-specialists/mcp/index.js"],
+      "command": "npx",
+      "args": ["-y", "ergora-specialists-mcp"],
       "env": { "ERGORA_EMAIL": "you@company.com" }
     }
   }
 }
 ```
+
+From source instead: `git clone https://github.com/ergoracloud/ergora-specialists && cd ergora-specialists/mcp && npm install`, then point `command` at `node /absolute/path/to/mcp/index.js`.
 
 ## Tools
 - `ergora_sales`, `ergora_marketing`, `ergora_ads`, `ergora_content`, `ergora_ecommerce`, `ergora_entrepreneurship`, `ergora_business_strategy`, `ergora_community`, `ergora_creator`, `ergora_design`, `ergora_developer`, `ergora_finance`, `ergora_hr`, `ergora_leadership`, `ergora_legal`, `ergora_local`, `ergora_pr` — one per specialist. Input: `{ query, top_k?, email? }`.
