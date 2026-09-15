@@ -1,0 +1,26 @@
+name = "ergora-specialists-gateway"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+account_id = "c9edb4c8373162e323c2718a364afc62"
+workers_dev = true
+
+# Isolated public KB store — NEVER the prod Supabase.
+[[vectorize]]
+binding = "KB"
+index_name = "ergora-kb"
+
+# Rate-limit counters + lead records (per-email).
+[[kv_namespaces]]
+binding = "GATE"
+id = "e598a514ed624f4eb6a9f31c3400990d"
+
+[vars]
+DAILY_LIMIT = "30"   # per email per UTC day (free tier)
+ANON_LIMIT = "5"     # per IP per UTC day when no email is supplied (remote MCP without headers)
+ATTRIBUTION_URL = "https://ergora.app"
+GCP_PROJECT = "ergora-492323"
+GCP_LOCATION = "us-central1"
+
+# Secrets (set with `wrangler secret put`):
+#   GCP_SA_JSON   - Google service-account JSON (Vertex embeddings)
+#   LOOPS_API_KEY - Loops (lead capture)

@@ -1,0 +1,14 @@
+{
+  "name": "ergora-specialists-mcp",
+  "version": "0.1.0",
+  "description": "Ergora Specialists — 17 business-vertical knowledge specialists (sales, marketing, ads, ecommerce, finance, HR, legal, PR...) as MCP tools for Claude, Cursor and any MCP client.",
+  "type": "module",
+  "bin": { "ergora-specialists-mcp": "index.js" },
+  "files": ["index.js", "README.md"],
+  "keywords": ["mcp", "model-context-protocol", "marketing", "sales", "ecommerce", "business", "ergora", "claude", "cursor"],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0"
+  },
+  "engines": { "node": ">=18" }
+}
