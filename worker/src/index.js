@@ -5,7 +5,7 @@
 // Query flow: identify caller (email → 30/day, else IP → 5/day) -> embed (Vertex gemini-embedding-001) -> Vectorize `ergora-kb`
 // Reads ONLY the isolated Vectorize store. Never touches production Supabase.
 
-const SERVER_VERSION = "0.3.1";
+const SERVER_VERSION = "0.3.2";
 const MCP_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 const VERTICALS = {

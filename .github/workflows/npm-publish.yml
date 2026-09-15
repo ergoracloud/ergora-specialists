@@ -1,7 +1,13 @@
-# Publishes mcp/ to npm as `ergora-specialists-mcp` via npm Trusted Publishing (OIDC) — no npm token stored.
-# One-time setup on npmjs.com (package → Settings → Trusted Publisher → GitHub Actions):
-#   organization: ergoracloud   repository: ergora-specialists   workflow filename: npm-publish.yml
-# Then: bump mcp/package.json version, push a v* tag (or run manually). Provenance attestations are automatic.
+# Release pipeline — triggered by pushing a v* tag (or manual dispatch).
+# Job 1 publishes mcp/ to npm via npm Trusted Publishing (OIDC, no stored token).
+# Job 2 (after npm succeeds) publishes server.json to the official MCP Registry via GitHub OIDC.
+#
+# The FILENAME npm-publish.yml is pinned in npm's Trusted Publisher config
+# (npmjs.com → package → Settings → Trusted Publisher: ergoracloud/ergora-specialists,
+# workflow npm-publish.yml). Do NOT rename this file or the npm OIDC publish breaks.
+#
+# Release steps: bump the version in mcp/package.json, mcp/index.js, server.json
+# (both version + packages[].version) and worker/src/index.js, then push a matching v* tag.
 name: Publish to npm
 
 on:
@@ -9,13 +15,12 @@ on:
   push:
     tags: ["v*"]
 
-permissions:
-  id-token: write
-  contents: read
-
 jobs:
-  publish:
+  npm:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     defaults:
       run:
         working-directory: mcp
@@ -38,3 +43,28 @@ jobs:
 
       - name: Publish
         run: npm publish
+
+  registry:
+    needs: npm            # registry ownership check reads the npm package, so publish npm first
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mcp-publisher
+        run: |
+          set -euo pipefail
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+          sudo mv mcp-publisher /usr/local/bin/mcp-publisher
+          mcp-publisher --help | head -3
+
+      - name: Validate server.json
+        run: mcp-publisher validate
+
+      - name: Authenticate (GitHub OIDC → io.github.ergoracloud/*)
+        run: mcp-publisher login github-oidc
+
+      - name: Publish
+        run: mcp-publisher publish

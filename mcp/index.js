@@ -60,7 +60,7 @@ async function gatewayQuery(query, vertical, topK) {
   return { text: `${lines.join("\n")}\n\n${data.attribution}\n(${data.meta.remaining_today} free queries remaining today)` };
 }
 
-const server = new Server({ name: "ergora-specialists", version: "0.3.1" }, { capabilities: { tools: {} } });
+const server = new Server({ name: "ergora-specialists", version: "0.3.2" }, { capabilities: { tools: {} } });
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
