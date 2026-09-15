@@ -63,17 +63,19 @@ jobs:
       - name: Validate server.json
         run: mcp-publisher validate
 
-      - name: Wait for the npm version to propagate (registry reads it back)
+      - name: Wait for the npm version to clear automated review + propagate
         run: |
           set -euo pipefail
           VER=$(node -p "require('./server.json').packages[0].version")
-          for i in $(seq 1 30); do
+          # New npm versions sit in "Validating" (automated security review) before they are
+          # publicly readable; the registry's ownership check needs the version live. Poll up to 30 min.
+          for i in $(seq 1 90); do
             if npm view "ergora-specialists-mcp@${VER}" version >/dev/null 2>&1; then
               echo "ergora-specialists-mcp@${VER} is live on npm"; exit 0
             fi
-            echo "waiting for ergora-specialists-mcp@${VER} on npm ($i)…"; sleep 10
+            echo "waiting for ergora-specialists-mcp@${VER} to clear npm review ($i/90)…"; sleep 20
           done
-          echo "timed out waiting for npm propagation"; exit 1
+          echo "timed out waiting for npm to publish ${VER}"; exit 1
 
       - name: Authenticate (GitHub OIDC → io.github.ergoracloud/*)
         run: mcp-publisher login github-oidc
