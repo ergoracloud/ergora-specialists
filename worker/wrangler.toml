@@ -15,8 +15,12 @@ binding = "GATE"
 id = "e598a514ed624f4eb6a9f31c3400990d"
 
 [vars]
-DAILY_LIMIT = "30"   # per email per UTC day (free tier)
-ANON_LIMIT = "5"     # per IP per UTC day when no email is supplied (remote MCP without headers)
+DAILY_LIMIT = "30"          # per email per UTC day (free tier)
+ANON_LIMIT = "5"            # per IP per UTC day when no email is supplied (remote MCP without headers)
+IP_DAILY_LIMIT = "200"      # ceiling per IP per day even WITH emails — one host can't rotate emails for unlimited use
+GLOBAL_DAILY_LIMIT = "20000" # kill-switch across all callers (~$0.40/day worst case: Vertex embeds + Vectorize)
+BURST_LIMIT = "30"          # informational; the real value is the [[ratelimits]] block below
+
 ATTRIBUTION_URL = "https://ergora.app"
 GCP_PROJECT = "ergora-492323"
 GCP_LOCATION = "us-central1"
@@ -24,3 +28,9 @@ GCP_LOCATION = "us-central1"
 # Secrets (set with `wrangler secret put`):
 #   GCP_SA_JSON   - Google service-account JSON (Vertex embeddings)
 #   LOOPS_API_KEY - Loops (lead capture)
+
+# Edge burst limiter (sliding window per caller key: email or IP). Stops parallel floods and KV counter races.
+[[ratelimits]]
+name = "BURST"
+namespace_id = "1001"
+simple = { limit = 30, period = 60 }

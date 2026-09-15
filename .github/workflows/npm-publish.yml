@@ -1,0 +1,40 @@
+# Publishes mcp/ to npm as `ergora-specialists-mcp` via npm Trusted Publishing (OIDC) — no npm token stored.
+# One-time setup on npmjs.com (package → Settings → Trusted Publisher → GitHub Actions):
+#   organization: ergoracloud   repository: ergora-specialists   workflow filename: npm-publish.yml
+# Then: bump mcp/package.json version, push a v* tag (or run manually). Provenance attestations are automatic.
+name: Publish to npm
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Update npm (trusted publishing needs npm >= 11.5.1)
+        run: npm install -g npm@latest && npm -v
+
+      - name: Install (lockfile)
+        run: npm ci --omit=dev
+
+      - name: Smoke-test the stdio server against the live gateway
+        run: node --check index.js
+
+      - name: Publish
+        run: npm publish

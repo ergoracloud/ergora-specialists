@@ -1,7 +1,8 @@
 // End-to-end: spawn the MCP server over stdio, list tools, call a specialist tool.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-const transport = new StdioClientTransport({ command: "node", args: ["index.js"], env: { ...process.env, ERGORA_EMAIL: "mcp-test@ergora.app" } });
+if (!process.env.ERGORA_EMAIL) throw new Error("set ERGORA_EMAIL=<your email> — the test uses the real gateway and your free-tier quota");
+const transport = new StdioClientTransport({ command: "node", args: ["index.js"], env: { ...process.env } });
 const client = new Client({ name: "e2e", version: "0.0.1" });
 await client.connect(transport);
 const { tools } = await client.listTools();

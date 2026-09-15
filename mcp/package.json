@@ -7,6 +7,10 @@
   "files": ["index.js", "README.md"],
   "keywords": ["mcp", "model-context-protocol", "marketing", "sales", "ecommerce", "business", "ergora", "claude", "cursor"],
   "license": "MIT",
+  "homepage": "https://github.com/ergoracloud/ergora-specialists#readme",
+  "bugs": { "url": "https://github.com/ergoracloud/ergora-specialists/issues" },
+  "repository": { "type": "git", "url": "git+https://github.com/ergoracloud/ergora-specialists.git", "directory": "mcp" },
+  "publishConfig": { "access": "public" },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0"
   },

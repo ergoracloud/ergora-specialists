@@ -5,7 +5,7 @@
 // Query flow: identify caller (email → 30/day, else IP → 5/day) -> embed (Vertex gemini-embedding-001) -> Vectorize `ergora-kb`
 // Reads ONLY the isolated Vectorize store. Never touches production Supabase.
 
-const SERVER_VERSION = "0.2.1";
+const SERVER_VERSION = "0.3.1";
 const MCP_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 const VERTICALS = {
@@ -50,6 +50,9 @@ const SPECIALISTS = {
 };
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const MAX_EMAIL = 254;          // RFC 5321 — also keeps KV keys well under the 512-byte limit
+const MAX_BODY = 32 * 1024;     // any legitimate MCP/JSON request is a few KB
+const MAX_BATCH = 20;           // JSON-RPC batch cap
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
@@ -124,12 +127,25 @@ async function embedQuery(env, query) {
 }
 
 // ── Lead capture (Loops) — fire-and-forget, never blocks the query ──
+// Only domains that can actually receive mail (MX or A record via DNS-over-HTTPS) reach Loops,
+// so typo/junk/rotated emails cost nothing and never pollute the lead list.
+async function hasMailDomain(domain) {
+  try {
+    for (const type of ["MX", "A"]) {
+      const r = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(domain)}&type=${type}`, { headers: { accept: "application/dns-json" } });
+      const d = await r.json();
+      if (d.Status === 0 && Array.isArray(d.Answer) && d.Answer.length) return true;
+    }
+  } catch { /* treat lookup failure as not deliverable */ }
+  return false;
+}
 async function captureLead(env, email, vertical) {
   const key = `lead:${email}`;
   const existing = await env.GATE.get(key);
   if (existing) return;
-  await env.GATE.put(key, JSON.stringify({ firstSeen: new Date().toISOString(), firstVertical: vertical || "any" }));
-  if (!env.LOOPS_API_KEY) return;
+  const deliverable = await hasMailDomain(email.split("@")[1] || "");
+  await env.GATE.put(key, JSON.stringify({ firstSeen: new Date().toISOString(), firstVertical: vertical || "any", deliverable }));
+  if (!deliverable || !env.LOOPS_API_KEY) return;
   await fetch("https://app.loops.so/api/v1/contacts/create", {
     method: "POST",
     headers: { authorization: `Bearer ${env.LOOPS_API_KEY}`, "content-type": "application/json" },
@@ -139,32 +155,65 @@ async function captureLead(env, email, vertical) {
 
 // ── Caller identity + rate limit (per UTC day). Email = free tier (DAILY_LIMIT); no email = anonymous per-IP (ANON_LIMIT). ──
 function identify(email, ip) {
-  if (email && EMAIL_RE.test(String(email).trim())) return { kind: "email", key: String(email).trim().toLowerCase() };
+  const e = email == null ? "" : String(email).trim();
+  if (e && e.length <= MAX_EMAIL && EMAIL_RE.test(e)) return { kind: "email", key: e.toLowerCase() };
   return { kind: "ip", key: ip || "unknown" };
 }
-async function rateLimit(env, who) {
-  const day = new Date().toISOString().slice(0, 10);
-  const key = who.kind === "email" ? `rl:${who.key}:${day}` : `rl:ip:${who.key}:${day}`;
-  const limit = parseInt((who.kind === "email" ? env.DAILY_LIMIT : env.ANON_LIMIT) || (who.kind === "email" ? "30" : "5"), 10);
+// KV day-counter. Eventually consistent = a soft cap; the BURST binding below catches parallel floods.
+async function bump(env, key, limit) {
   const used = parseInt((await env.GATE.get(key)) || "0", 10);
   if (used >= limit) return { ok: false, used, limit };
-  await env.GATE.put(key, String(used + 1), { expirationTtl: 60 * 60 * 26 });
+  try {
+    await env.GATE.put(key, String(used + 1), { expirationTtl: 60 * 60 * 26 });
+  } catch {
+    // KV permits ~1 write/s per key. Contention on a caller's key means that caller is hammering — fail closed.
+    return { ok: false, used, limit, reason: "burst" };
+  }
   return { ok: true, used: used + 1, limit };
+}
+const GLOBAL_SHARDS = 16; // spread the global counter over 16 keys so normal traffic never trips KV's per-key write limit
+// Four layers, cheapest first:
+//  1. BURST  — edge rate-limit binding, ~30 req/min per caller (stops parallel floods / KV races)
+//  2. GLOBAL — kill-switch on total queries/day (bounds worst-case Vertex + Vectorize spend)
+//  3. IP     — anonymous quota (ANON_LIMIT), or a per-network ceiling behind emails (IP_DAILY_LIMIT) so one host can't rotate emails
+//  4. EMAIL  — the free tier (DAILY_LIMIT)
+async function rateLimit(env, who, ip) {
+  const day = new Date().toISOString().slice(0, 10);
+  const n = (k, d) => parseInt(env[k] || String(d), 10);
+  if (env.BURST) {
+    const { success } = await env.BURST.limit({ key: who.key });
+    if (!success) return { ok: false, reason: "burst", limit: n("BURST_LIMIT", 30) };
+  }
+  const g = await bump(env, `global:${day}:${Math.floor(Math.random() * GLOBAL_SHARDS)}`, Math.ceil(n("GLOBAL_DAILY_LIMIT", 20000) / GLOBAL_SHARDS));
+  if (!g.ok) return { ok: false, reason: g.reason || "global", used: g.used, limit: g.limit * GLOBAL_SHARDS };
+  const ipr = await bump(env, `rl:ip:${ip || "unknown"}:${day}`, who.kind === "ip" ? n("ANON_LIMIT", 5) : n("IP_DAILY_LIMIT", 200));
+  if (!ipr.ok) return { ok: false, reason: ipr.reason || (who.kind === "ip" ? "anon" : "ip"), used: ipr.used, limit: ipr.limit };
+  if (who.kind === "ip") return { ok: true, used: ipr.used, limit: ipr.limit };
+  const er = await bump(env, `rl:${who.key}:${day}`, n("DAILY_LIMIT", 30));
+  if (!er.ok) return { ok: false, reason: er.reason || "email", used: er.used, limit: er.limit };
+  return { ok: true, used: er.used, limit: er.limit };
 }
 
 // ── Core query — shared by /query and /mcp. Returns { status, body }. ──
 async function runQuery(env, ctx, { query, vertical, topK, email, ip }) {
   if (!query || typeof query !== "string" || !query.trim()) return { status: 400, body: { error: "query required" } };
-  if (vertical && !VERTICALS[vertical]) return { status: 400, body: { error: `unknown vertical '${vertical}'`, valid: Object.keys(VERTICALS) } };
+  if (vertical && !Object.hasOwn(VERTICALS, vertical)) return { status: 400, body: { error: `unknown vertical '${String(vertical).slice(0, 40)}'`, valid: Object.keys(VERTICALS) } };
   const k = Math.min(Math.max(parseInt(topK || 5, 10) || 5, 1), 10);
   const who = identify(email, ip);
 
-  const rl = await rateLimit(env, who);
+  const rl = await rateLimit(env, who, ip);
   if (!rl.ok) {
-    const anonHint = who.kind === "ip"
+    const msg = {
+      burst: "too many requests — slow down (about 30 per minute is the ceiling)",
+      global: "the free service has reached today's capacity — try again tomorrow",
+      anon: `daily limit reached (${rl.limit}/day anonymous)`,
+      ip: `daily limit reached for this network (${rl.limit}/day)`,
+      email: `daily limit reached (${rl.limit}/day on the free tier)`,
+    }[rl.reason];
+    const anonHint = rl.reason === "anon"
       ? `Add an email to unlock ${env.DAILY_LIMIT || 30} free queries/day (X-Ergora-Email header, ERGORA_EMAIL, or the \`email\` tool argument). `
       : "";
-    return { status: 429, body: { error: `daily limit reached (${rl.limit}/day ${who.kind === "email" ? "on the free tier" : "anonymous"})`, upgrade: anonHint + upgradeLine(env) } };
+    return { status: rl.reason === "global" ? 503 : 429, body: { error: msg, upgrade: anonHint + upgradeLine(env) } };
   }
   if (who.kind === "email") ctx.waitUntil(captureLead(env, who.key, vertical));
 
@@ -282,9 +331,9 @@ async function handleRpc(msg, { env, ctx, ip, hdrEmail }) {
         return rpcResult(id, { content: [{ type: "text", text }] });
       }
       let vertical;
-      if (name === "ergora_ask") vertical = args.vertical || undefined;
-      else if (SPECIALISTS[name]) vertical = SPECIALISTS[name][0];
-      else return rpcError(id, -32602, `Unknown tool: ${name}`);
+      if (name === "ergora_ask") vertical = args.vertical || undefined;          // validated (hasOwn) in runQuery
+      else if (Object.hasOwn(SPECIALISTS, name)) vertical = SPECIALISTS[name][0];
+      else return rpcError(id, -32602, `Unknown tool: ${String(name).slice(0, 60)}`);
       try {
         const r = await runQuery(env, ctx, { query: String(args.query || ""), vertical, topK: args.top_k, email: hdrEmail || args.email, ip });
         return rpcResult(id, { content: [{ type: "text", text: formatToolText(env, r, vertical) }], isError: r.status !== 200 });
@@ -302,6 +351,7 @@ async function handleMcp(request, env, ctx) {
   if (request.method === "DELETE") return new Response(null, { status: 200, headers: CORS }); // no sessions to end
   if (request.method !== "POST") return new Response(null, { status: 405, headers: { allow: "POST", ...CORS } });
 
+  if (parseInt(request.headers.get("content-length") || "0", 10) > MAX_BODY) return json(rpcError(null, -32600, "Request too large"), 413);
   let body;
   try { body = await request.json(); } catch { return json(rpcError(null, -32700, "Parse error"), 400); }
   const scope = {
@@ -310,6 +360,7 @@ async function handleMcp(request, env, ctx) {
     hdrEmail: request.headers.get("x-ergora-email") || "",
   };
   const msgs = Array.isArray(body) ? body : [body];
+  if (msgs.length > MAX_BATCH) return json(rpcError(null, -32600, `Batch too large (max ${MAX_BATCH})`), 400);
   const out = [];
   for (const m of msgs) { const r = await handleRpc(m, scope); if (r) out.push(r); }
   if (!out.length) return new Response(null, { status: 202, headers: CORS });
@@ -317,8 +368,7 @@ async function handleMcp(request, env, ctx) {
   return json(Array.isArray(body) ? out : out[0], 200, { "mcp-protocol-version": pv });
 }
 
-export default {
-  async fetch(request, env, ctx) {
+async function route(request, env, ctx) {
     const url = new URL(request.url);
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
 
@@ -335,6 +385,7 @@ export default {
       return json({ verticals: Object.entries(VERTICALS).map(([slug, name]) => ({ slug, name })) });
 
     if (url.pathname === "/query" && request.method === "POST") {
+      if (parseInt(request.headers.get("content-length") || "0", 10) > MAX_BODY) return json({ error: "request too large" }, 413);
       let body;
       try { body = await request.json(); } catch { return json({ error: "invalid JSON body" }, 400); }
       const r = await runQuery(env, ctx, {
@@ -346,5 +397,16 @@ export default {
     }
 
     return json({ error: "not found", routes: ["POST /mcp (MCP Streamable HTTP)", "GET /health", "GET /verticals", "POST /query {query, vertical?, email?, topK?}"] }, 404);
+}
+
+export default {
+  async fetch(request, env, ctx) {
+    try {
+      return await route(request, env, ctx);
+    } catch (e) {
+      // Never leak internals (stack, upstream URLs, binding names) to callers.
+      console.error("unhandled:", e?.message);
+      return json({ error: "internal error" }, 500);
+    }
   },
 };
