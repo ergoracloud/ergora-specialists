@@ -66,18 +66,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     ...Object.entries(SPECIALISTS).map(([name, [, desc]]) => ({
       name,
+      title: `Ergora ${desc.split(" — ")[0]} Specialist`,
       description: `Ask the Ergora ${desc}. Returns summarised, cited insights from a curated knowledge base of leading practitioners, books and research.`,
       inputSchema: queryInput,
+      annotations: { title: `Ergora ${desc.split(" — ")[0]} Specialist`, readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     })),
     {
       name: "ergora_ask",
+      title: "Ask all Ergora Specialists",
       description: "Ask across ALL 17 Ergora specialists at once (cross-vertical). Use a specific ergora_<vertical> tool when you know the domain.",
       inputSchema: { ...queryInput, properties: { ...queryInput.properties, vertical: { type: "string", enum: Object.values(SPECIALISTS).map(v => v[0]), description: "Optional: restrict to one vertical slug." } } },
+      annotations: { title: "Ask all Ergora Specialists", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
     {
       name: "ergora_list_specialists",
+      title: "List Ergora Specialists",
       description: "List the 17 Ergora specialist verticals available and what each covers.",
       inputSchema: { type: "object", properties: {} },
+      annotations: { title: "List Ergora Specialists", readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
   ],
 }));

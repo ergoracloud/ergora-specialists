@@ -209,21 +209,24 @@ function mcpTools() {
   return [
     ...Object.entries(SPECIALISTS).map(([name, [, desc]]) => ({
       name,
+      title: `Ergora ${desc.split(" — ")[0]} Specialist`,
       description: `Ask the Ergora ${desc}. Returns summarised, cited insights from a curated knowledge base of leading practitioners, books and research.`,
       inputSchema: toolInput,
-      annotations: toolAnnotations,
+      annotations: { title: `Ergora ${desc.split(" — ")[0]} Specialist`, ...toolAnnotations },
     })),
     {
       name: "ergora_ask",
+      title: "Ask all Ergora Specialists",
       description: "Ask across ALL 17 Ergora specialists at once (cross-vertical). Use a specific ergora_<vertical> tool when you know the domain.",
       inputSchema: { ...toolInput, properties: { ...toolInput.properties, vertical: { type: "string", enum: Object.keys(VERTICALS), description: "Optional: restrict to one vertical slug." } } },
-      annotations: toolAnnotations,
+      annotations: { title: "Ask all Ergora Specialists", ...toolAnnotations },
     },
     {
       name: "ergora_list_specialists",
+      title: "List Ergora Specialists",
       description: "List the 17 Ergora specialist verticals available and what each covers.",
       inputSchema: { type: "object", properties: {} },
-      annotations: toolAnnotations,
+      annotations: { title: "List Ergora Specialists", ...toolAnnotations },
     },
   ];
 }
