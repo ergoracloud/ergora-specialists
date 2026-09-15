@@ -1,0 +1,26 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ergoracloud/ergora-specialists",
+  "title": "Ergora Specialists",
+  "description": "17 business specialists — sales, marketing, ads, ecommerce, finance, HR, legal, PR… Cited insights.",
+  "version": "0.2.1",
+  "websiteUrl": "https://ergora.app",
+  "repository": {
+    "url": "https://github.com/ergoracloud/ergora-specialists",
+    "source": "github"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://ergora-specialists-gateway.contact-c9e.workers.dev/mcp",
+      "headers": [
+        {
+          "name": "X-Ergora-Email",
+          "description": "Optional. Your email — unlocks 30 free queries/day (5/day anonymous without it).",
+          "isRequired": false,
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}
