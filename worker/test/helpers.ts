@@ -60,19 +60,52 @@ export async function seedDocs(rows: Array<{ id: string; vertical: string; title
   }
 }
 
-export async function call(e: Env, path: string, init: RequestInit & { ip?: string } = {}): Promise<Response> {
+export async function call(e: Env, path: string, init: RequestInit & { ip?: string; asn?: number } = {}): Promise<Response> {
   const headers = new Headers(init.headers);
   headers.set("cf-connecting-ip", init.ip ?? "203.0.113.7");
   const ctx = createExecutionContext();
-  const res = await worker.fetch(new Request(`https://gw.example.test${path}`, { ...init, headers }), e, ctx);
+  const { ip: _ip, asn, ...rest } = init;
+  void _ip;
+  const req = new Request(`https://gw.example.test${path}`, { ...rest, headers, ...(asn ? { cf: { asn } } : {}) } as RequestInit);
+  const res = await worker.fetch(req, e, ctx);
   await waitOnExecutionContext(ctx);
   return res;
 }
 
-export function postQuery(e: Env, body: Record<string, unknown>, opts: { ip?: string; email?: string } = {}) {
+export function postQuery(e: Env, body: Record<string, unknown>, opts: { ip?: string; email?: string; asn?: number } = {}) {
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (opts.email) headers["x-ergora-email"] = opts.email;
-  return call(e, "/query", { method: "POST", body: JSON.stringify(body), headers, ip: opts.ip });
+  return call(e, "/query", { method: "POST", body: JSON.stringify(body), headers, ip: opts.ip, asn: opts.asn });
+}
+
+// A BURST stand-in that records keys and can be told to refuse.
+export function fakeLimiter(allow: (key: string) => boolean = () => true) {
+  const keys: string[] = [];
+  const limiter = { limit: vi.fn(async ({ key }: { key: string }) => { keys.push(key); return { success: allow(key) }; }) };
+  return { keys, limiter: limiter as unknown as RateLimit };
+}
+
+// Wraps the Gate namespace so a test can count how many requests reached the Durable Object.
+export function countingGate(e: Env) {
+  const real = e.GATE_DO;
+  let calls = 0;
+  const ns = {
+    idFromName: (n: string) => real.idFromName(n),
+    get: (id: DurableObjectId) => {
+      const stub = real.get(id);
+      return new Proxy(stub, {
+        get(target, prop, receiver) {
+          if (prop === "admit") return (input: unknown) => { calls += 1; return (target as unknown as { admit: (i: unknown) => unknown }).admit(input); };
+          return Reflect.get(target, prop, receiver);
+        },
+      });
+    },
+  } as unknown as Env["GATE_DO"];
+  return { ns, calls: () => calls };
+}
+
+export function gateOf(e: Env) {
+  return e.GATE_DO.get(e.GATE_DO.idFromName(e.GATE_NAME || "gate"));
 }
 
 export function rpc(e: Env, method: string, params: Record<string, unknown> = {}, opts: { ip?: string } = {}) {

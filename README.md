@@ -56,16 +56,20 @@ Claude Desktop / Cursor: `claude_desktop_config.json` / `.cursor/mcp.json`:
 From source instead: `git clone https://github.com/ergoracloud/ergora-specialists && cd ergora-specialists/mcp && npm install`, then point `command` at `node /absolute/path/to/mcp/index.js`.
 
 ## Tools
-- `ergora_sales`, `ergora_marketing`, `ergora_ads`, `ergora_content`, `ergora_ecommerce`, `ergora_entrepreneurship`, `ergora_business_strategy`, `ergora_community`, `ergora_creator`, `ergora_design`, `ergora_developer`, `ergora_finance`, `ergora_hr`, `ergora_leadership`, `ergora_legal`, `ergora_local`, `ergora_pr`: one per specialist. Input: `{ query, top_k?, email? }`.
+- `ergora_sales`, `ergora_marketing`, `ergora_ads`, `ergora_content`, `ergora_ecommerce`, `ergora_entrepreneurship`, `ergora_business_strategy`, `ergora_community`, `ergora_creator`, `ergora_design`, `ergora_developer`, `ergora_finance`, `ergora_hr`, `ergora_leadership`, `ergora_legal`, `ergora_local`, `ergora_pr`: one per specialist. Input: `{ query, top_k?, email?, subscribe? }`.
 - `ergora_ask`: cross-vertical (optionally `vertical`).
 - `ergora_list_specialists`: what's available.
 
 ## Free tier
-Your email is the access key: 30 queries/day. Supply it as the `X-Ergora-Email` header (remote), `ERGORA_EMAIL` (local), or the `email` tool argument. Without one, requests are limited to 5/day per IP. Fair use: about 30 requests per minute per caller; bursts beyond that get a `429`.
+Your email is the access key: 30 queries/day. Supply it as the `X-Ergora-Email` header (remote), `ERGORA_EMAIL` (local), or the `email` tool argument. Without one, requests are limited to 5/day per IP. Fair use: about 30 requests per minute per network; bursts beyond that get a `429`. MCP batches are limited to 5 messages.
 
-The whole service also has a shared daily limit (2,500 queries a day). When it is reached every caller gets a clear "try again tomorrow (00:00 UTC) or use Ergora" message until the next UTC day.
+To keep the free tier fair, one mailbox counts once (letter case, `+tags` and Gmail dots are ignored), a network can use up to 3 different unconfirmed emails a day, and unconfirmed traffic from one network has a shared daily ceiling. Confirmed emails are not affected by those network ceilings. Inside hosted clients that share egress addresses (for example Claude), anonymous use is small and unconfirmed emails get 10 queries a day.
 
-The first time you use an email we send one message asking you to confirm it. Only confirmed addresses are added to Ergora's mailing list (for an occasional update, unsubscribe any time). Unconfirmed emails are used for your quota only. No third-party sharing.
+The whole service also has a shared daily limit (2,500 queries a day), part of which is kept for confirmed emails and hosted clients. When it is reached every caller gets a clear "try again tomorrow (00:00 UTC) or use Ergora" message until the next UTC day.
+
+Confirming an email is optional. After you have used an email on a few queries over more than one day (or straight away if you pass `subscribe: true`), we may send one message asking you to confirm it. Only confirmed addresses are added to Ergora's mailing list (for an occasional update, unsubscribe any time). Unconfirmed emails are used for your quota only and are deleted after 60 days. No third-party sharing.
+
+The gateway sends no CORS headers: call it from a server, an MCP client or the stdio package, not from browser JavaScript.
 
 ## How it works
 Queries go to a Cloudflare Worker gateway which embeds the question with Workers AI (`bge-small-en-v1.5`) and searches an **isolated** vector store of the Ergora knowledge base (never Ergora's production customer database). Only approved entries whose source is on a reviewed allowlist are returned. Results are summaries with links to the original sources, with no verbatim reproduction. If vector search is unavailable or over budget the gateway answers from a keyword index of the same entries and says so.

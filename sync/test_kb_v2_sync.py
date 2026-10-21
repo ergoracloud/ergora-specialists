@@ -8,6 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import kb_v2_sync as s  # noqa: E402
 
 ALLOWED, EXCLUDED = s.load_policy()
+TEXT = json.loads((Path(__file__).resolve().parent.parent / "shared" / "text_cases.json").read_text())
 CASES = json.loads((Path(__file__).resolve().parent.parent / "shared" / "policy_cases.json").read_text())["cases"]
 
 
@@ -40,6 +41,67 @@ class Policy(unittest.TestCase):
         d = s.gate_row("sales", row(), ALLOWED, EXCLUDED)
         self.assertEqual(s.embed_text(d), "Cold email\nKeep it short.")
         self.assertNotIn("Represent this sentence", s.embed_text(d))
+
+
+class TextHygiene(unittest.TestCase):
+    def test_strip_parity_with_worker(self):
+        for raw, expected in TEXT["strip"]:
+            self.assertEqual(s.strip_links(raw), expected, raw)
+
+    def test_title_parity_with_worker(self):
+        for title, summary, expected in TEXT["titles"]:
+            self.assertEqual(s.public_title(title, summary), expected, title)
+
+    def test_gate_row_cleans_title_and_summary(self):
+        d = s.gate_row("sales", row(title="https://www.gorgias.com/blog", summary="Reply fast. See [docs](https://evil.example/x)."), ALLOWED, EXCLUDED)
+        self.assertEqual(d["title"], "Reply fast")
+        self.assertEqual(d["summary"], "Reply fast. See docs.")
+        self.assertIsNone(s.gate_row("sales", row(summary="https://only-a-link.example/x"), ALLOWED, EXCLUDED))
+
+
+class Dedupe(unittest.TestCase):
+    def doc(self, i, v="sales", url="https://www.close.com/blog/a", title="Cold email", summary="Keep it short and specific."):
+        return {"id": f"{v}_{i}", "vertical": v, "title": title, "summary": summary, "source_url": url}
+
+    def test_same_source_page_in_one_vertical_kept_once(self):
+        docs = [self.doc(1), self.doc(2, url="https://close.com/blog/a/?utm_source=x", summary="Keep it short, specific and personal."),
+                self.doc(3, url="https://www.close.com/blog/b", title="Follow ups", summary="Follow up four times.")]
+        kept, dropped = s.dedupe(docs)
+        self.assertEqual(sorted(d["id"] for d in kept), ["sales_2", "sales_3"])  # longest summary wins
+        self.assertEqual(dropped, [("sales_1", "sales_2")])
+
+    def test_same_page_in_two_verticals_is_kept_in_both(self):
+        kept, dropped = s.dedupe([self.doc(1), self.doc(1, v="content")])
+        self.assertEqual(len(kept), 2)
+        self.assertEqual(dropped, [])
+
+    def test_near_identical_text_from_different_urls(self):
+        long = "Value based pricing beats cost plus pricing for most B2B SaaS products because buyers pay for outcomes not inputs"
+        a = self.doc(1, url="https://www.close.com/blog/x", title="Pricing", summary=long)
+        b = self.doc(2, url="https://www.close.com/blog/y", title="Pricing", summary=long + ".")
+        c = self.doc(3, url="https://www.close.com/blog/z", title="Hiring", summary="Hire slowly and fire quickly.")
+        kept, dropped = s.dedupe([a, b, c])
+        self.assertEqual(len(kept), 2)
+        self.assertEqual(len(dropped), 1)
+
+    def test_source_key(self):
+        self.assertEqual(s.source_key("https://www.a.com/p/x/?utm_medium=m&id=2"), "a.com/p/x?id=2")
+
+
+class Postgres(unittest.TestCase):
+    def test_pg_env_keeps_password_out_of_argv(self):
+        env = s.pg_env("postgresql://kb_sync_reader.ref:p%40ss@aws-0-eu-west-2.pooler.supabase.com:5432/postgres")
+        self.assertEqual(env["PGUSER"], "kb_sync_reader.ref")
+        self.assertEqual(env["PGPASSWORD"], "p@ss")
+        self.assertEqual(env["PGSSLMODE"], "require")
+        self.assertEqual(env["PGPORT"], "5432")
+
+    def test_select_is_read_only_and_scoped(self):
+        sql = s.SELECT_SQL.format(table="sales_kb")
+        self.assertTrue(sql.startswith("SELECT"))
+        self.assertIn("audit_status = 'recurated'", sql)
+        with self.assertRaises(ValueError):
+            s.fetch_postgres("postgresql://u:p@h/db", ["sales_kb; drop table x"])
 
 
 class Planning(unittest.TestCase):

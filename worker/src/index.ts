@@ -13,28 +13,30 @@ import { publicError, STATUS } from "./errors";
 import { deepHealth } from "./health";
 import { handleConfirm } from "./leads";
 import { handleMcp } from "./mcp";
-import { gateStub, runQuery } from "./query";
+import { networkKey } from "./net";
+import { burstOk, gateStub, runQuery } from "./query";
 
 export { Gate } from "./gate";
 
-const CORS: Record<string, string> = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
-  "Access-Control-Allow-Headers": "content-type, accept, authorization, mcp-protocol-version, mcp-session-id, x-ergora-email",
-  "Access-Control-Expose-Headers": "mcp-protocol-version",
-};
-
+// No CORS on purpose: every supported client (Claude, ChatGPT and other hosted connectors, Claude Code, the stdio
+// package, MCP Inspector in its default proxy mode) calls from a server, not a browser page. Without
+// Access-Control-Allow-Origin a random web page cannot spend visitors' quotas through their browsers.
 const json = (body: unknown, status = 200, extra: Record<string, string> = {}) =>
-  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...CORS, ...extra } });
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...extra } });
+
+export const asnOf = (request: Request): number | null => {
+  const asn = (request as Request & { cf?: { asn?: unknown } }).cf?.asn;
+  return typeof asn === "number" ? asn : null;
+};
 
 async function route(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
   const url = new URL(request.url);
   const base = baseUrl(env, request);
-  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
+  if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: { allow: "GET, POST" } });
 
   switch (url.pathname) {
     case "/mcp":
-      return handleMcp(request, { env, ctx, base }, CORS);
+      return handleMcp(request, { env, ctx, base, asn: asnOf(request) });
 
     case "/":
     case "/health":
@@ -49,6 +51,12 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
       });
 
     case "/health/deep": {
+      // Memoised and single-flight in the Gate; the limiter stops one network from hammering it.
+      // The KVM2 uptime monitor probes once a minute from one IP, far below this.
+      const ip = request.headers.get("cf-connecting-ip") || "";
+      if (!(await burstOk(env.HEALTH_BURST ?? env.BURST, `health|${networkKey(ip)}`))) {
+        return json(publicError(env, "RATE_LIMITED"), STATUS.RATE_LIMITED, { "cache-control": "no-store", "retry-after": "60" });
+      }
       const h = await deepHealth(env, ctx);
       return json(h, h.ok ? 200 : 503, { "cache-control": "no-store" });
     }
@@ -76,12 +84,14 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
         topK: body.topK ?? body.top_k,
         email: request.headers.get("x-ergora-email") || body.email,
         ip: request.headers.get("cf-connecting-ip") || "",
+        asn: asnOf(request),
+        optIn: body.subscribe === true,
         base,
       });
       return json(r.body, r.status);
     }
   }
-  return json({ ...publicError(env, "NOT_FOUND"), routes: ["POST /mcp", "GET /health", "GET /health/deep", "GET /verticals", "POST /query {query, vertical?, email?, topK?}"] }, 404);
+  return json({ ...publicError(env, "NOT_FOUND"), routes: ["POST /mcp", "GET /health", "GET /health/deep", "GET /verticals", "POST /query {query, vertical?, email?, topK?, subscribe?}"] }, 404);
 }
 
 export default {

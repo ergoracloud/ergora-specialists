@@ -38,19 +38,27 @@ new_sqlite_classes = ["Gate"]
 
 [vars]
 GLOBAL_DAILY_LIMIT = "2500"     # service-wide queries per UTC day (Tom 2026-10-21). Alerts at ALERT_THRESHOLD_PCT and at 100%
+GLOBAL_RESERVE_PCT = "30"       # share of the global cap only confirmed emails and the hosted-client pool can use
 ALERT_THRESHOLD_PCT = "80"
-DAILY_LIMIT = "30"              # per email per UTC day
+DAILY_LIMIT = "30"              # per email per UTC day (one mailbox: case, +tags and Gmail dots are ignored)
 ANON_LIMIT = "5"                # per IP (IPv6: per /64) per day without an email
-IP_DAILY_LIMIT = "200"          # per network per day even with emails, so one host can't rotate addresses
+NET_UNCONFIRMED_LIMIT = "50"    # per network per day for anonymous + unconfirmed-email traffic together
+MAX_EMAILS_PER_NET = "3"        # distinct unconfirmed emails per network per day
+IP_DAILY_LIMIT = "200"          # per network per day, everything; only confirmed emails can get past NET_UNCONFIRMED_LIMIT
+V6_48_LIMIT = "300"             # per IPv6 /48 per day, unconfirmed traffic (stops /64 rotation)
+ASN_LIMIT = "1000"              # per ASN per day, unconfirmed traffic (big ISPs and CGNAT stay well under)
 # Hosted AI clients share a few egress IPs (Claude: https://claude.com/docs/connectors/building/authentication).
 POOLED_CIDRS = '["160.79.104.0/21"]'
-POOL_ANON_LIMIT = "250"         # per pool per day, anonymous
-POOL_IP_DAILY_LIMIT = "1000"    # per pool per day, emails included
+POOL_ANON_LIMIT = "60"          # per pool per day, anonymous (small: pooled users should pass an email)
+POOL_UNCONFIRMED_EMAIL_LIMIT = "10"  # per unconfirmed email per day inside the pool (confirmed: DAILY_LIMIT)
+POOL_UNCONFIRMED_LIMIT = "600"  # per pool per day, anonymous + unconfirmed emails
+POOL_IP_DAILY_LIMIT = "1000"    # per pool per day, everything
 # Vectorize Free: 30M queried dims/month = (stored + queries) x 384. 78,125 - ~9,000 stored - 1,440 health = ~67,600.
 VECTORIZE_MONTHLY_QUERY_BUDGET = "66000"
 D1_DAILY_ROWS_READ_BUDGET = "4000000"   # D1 Free: 5M rows read/day; keyword fallback stops at 4M
 CACHE_TTL_SEC = "86400"         # identical queries answered from the Gate cache for 24 h (KB syncs weekly)
-CONFIRM_DAILY_LIMIT = "100"     # max confirmation emails a day
+CONFIRM_DAILY_LIMIT = "100"     # max confirmation emails a day (sent only after 3 queries on 2 days, or `subscribe`)
+CONFIRM_NET_DAILY_LIMIT = "2"   # max confirmation emails a day per network
 HEALTH_TTL_SEC = "300"
 HEALTH_QUERY_TTL_SEC = "1800"
 ATTRIBUTION_URL = "https://ergora.app"
@@ -63,8 +71,16 @@ LOOPS_CONFIRM_TEMPLATE_ID = ""  # Loops transactional id for "confirm your email
 #   UPTIME_HUB_TOKEN  bearer token of the `ergora-specialists` source on uptime-hub
 # GCP_SA_JSON is no longer used: delete it after the v2 deploy (RUNBOOK step 9).
 
-# Edge burst limiter (per caller key: email, IP or pool). MUST stay after the whole [vars] block.
+# Edge burst limiters. MUST stay after the whole [vars] block.
+# BURST: per network (IPv4, IPv6 /64, or pool + IP), never per email, so rotating emails does not reset it.
+# One token per /query call and per MCP HTTP request that contains tools/call.
 [[ratelimits]]
 name = "BURST"
 namespace_id = "1001"
 simple = { limit = 30, period = 60 }
+
+# HEALTH_BURST: /health/deep per network (the KVM2 monitor probes once a minute).
+[[ratelimits]]
+name = "HEALTH_BURST"
+namespace_id = "1002"
+simple = { limit = 10, period = 60 }

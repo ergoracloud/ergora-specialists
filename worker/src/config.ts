@@ -1,6 +1,6 @@
 // Static configuration shared by every module. Runtime knobs live in wrangler.toml [vars].
 
-export const SERVER_VERSION = "0.4.0";
+export const SERVER_VERSION = "0.4.1";
 export const MCP_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 // Embedding model. MUST match sync/kb_v2_sync.py (same model, same pooling, documents without the
@@ -55,7 +55,7 @@ export const SPECIALISTS: Record<string, [string, string, string]> = {
 export const LIMITS = {
   MAX_EMAIL: 254, // RFC 5321
   MAX_BODY: 32 * 1024, // any legitimate MCP or JSON request is a few KB
-  MAX_BATCH: 20, // JSON-RPC batch cap
+  MAX_BATCH: 5, // JSON-RPC batch cap (each tools/call costs a Gate call; the whole batch spends one BURST token)
   MAX_QUERY_CHARS: 2000,
   MAX_TOP_K: 10,
   UPSTREAM_TIMEOUT_MS: 6000,
@@ -67,21 +67,30 @@ export interface Env {
   KB_FTS: D1Database;
   GATE_DO: DurableObjectNamespace<import("./gate").Gate>;
   BURST?: RateLimit;
+  HEALTH_BURST?: RateLimit;
   GATE_NAME?: string; // Durable Object instance name (tests use one per case); default "gate"
 
   // vars
   DAILY_LIMIT?: string;
   ANON_LIMIT?: string;
   IP_DAILY_LIMIT?: string;
+  NET_UNCONFIRMED_LIMIT?: string;
+  MAX_EMAILS_PER_NET?: string;
+  V6_48_LIMIT?: string;
+  ASN_LIMIT?: string;
   POOLED_CIDRS?: string;
   POOL_ANON_LIMIT?: string;
   POOL_IP_DAILY_LIMIT?: string;
+  POOL_UNCONFIRMED_LIMIT?: string;
+  POOL_UNCONFIRMED_EMAIL_LIMIT?: string;
   GLOBAL_DAILY_LIMIT?: string;
+  GLOBAL_RESERVE_PCT?: string;
   ALERT_THRESHOLD_PCT?: string;
   VECTORIZE_MONTHLY_QUERY_BUDGET?: string;
   D1_DAILY_ROWS_READ_BUDGET?: string;
   CACHE_TTL_SEC?: string;
   CONFIRM_DAILY_LIMIT?: string;
+  CONFIRM_NET_DAILY_LIMIT?: string;
   HEALTH_TTL_SEC?: string;
   HEALTH_QUERY_TTL_SEC?: string;
   ATTRIBUTION_URL?: string;

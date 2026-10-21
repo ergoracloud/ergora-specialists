@@ -11,10 +11,21 @@ Replaces /root/load_all_vectorize.py. Differences that matter:
   * Guards: refuses mass deletes, refuses to exceed the Vectorize Free stored-dimension cap, stays inside the
     D1 Free 100,000 rows-written/day and Workers AI 10,000 neurons/day allowances (resumes on the next run).
 
-Read-only on Supabase (PostgREST GETs). Writes only to the Cloudflare index and D1 database named below.
+  * Text hygiene (mirrors worker/src/policy.ts, parity cases in shared/text_cases.json): URLs and markdown links
+    are stripped from titles and summaries, and a title that is a bare URL is replaced by the summary's first
+    sentence. Near-duplicates inside a vertical (same source page, or almost the same title + summary) are
+    loaded once. Supabase rows are never modified.
+
+Read-only on Supabase. Writes only to the Cloudflare index and D1 database named below.
+
+Supabase access (least privilege): set PG_CONN_FILE to a file holding a postgresql:// URI for the
+`kb_sync_reader` role (SELECT on id, title, summary, source_url, audit_status of the 17 <vertical>_kb tables
+only, recurated rows only via RLS). Rows are read with psql; the password goes to psql through PGPASSWORD, never
+argv. Without PG_CONN_FILE the old PostgREST path with SB_KEY_FILE is used (rollback only).
 
 Credentials are read from files (never from argv, never printed):
-  SB_KEY_FILE    default /root/.sbkey             Supabase key with read access to the 17 <vertical>_kb tables
+  PG_CONN_FILE   e.g. /root/.kb_sync_pg            postgresql:// URI of kb_sync_reader (preferred)
+  SB_KEY_FILE    default /root/.sbkey             legacy: Supabase key for PostgREST (only if PG_CONN_FILE unset)
   CF_TOKEN_FILE  default /root/.cf_kb_v2_token    Cloudflare token: Workers AI Read+Edit, Vectorize Edit, D1 Edit
 Required env: D1_DATABASE_ID (from `wrangler d1 create ergora-kb-fts`).
 Optional env: CF_ACCT, KB_INDEX (default ergora-kb-v2), SUPABASE_REST.
@@ -30,6 +41,8 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import subprocess
 import sys
 import time
 import urllib.error
@@ -79,6 +92,91 @@ def is_allowed_source(url: str, allowed: set[str], excluded: list[str]) -> bool:
     return host in allowed
 
 
+# ── text hygiene (mirrors worker/src/policy.ts) ──────────────────────────────────────────────────────
+MD_IMAGE = re.compile(r"!\[([^\]]*)\]\([^)]*\)")
+MD_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+ANGLE_URL = re.compile(r"<(?:https?://|www\.)[^>\s]*>", re.I)
+BARE_URL = re.compile(r"(?:https?://|www\.)[^\s<>()\[\]]+", re.I)
+BARE_URL_TITLE = re.compile(r"^\s*(?:https?://|www\.)\S*\s*$", re.I)
+
+
+def strip_links(text: str) -> str:
+    t = MD_IMAGE.sub(r"\1", text)
+    t = MD_LINK.sub(r"\1", t)
+    t = ANGLE_URL.sub(" ", t)
+    t = BARE_URL.sub(" ", t)
+    t = re.sub(r"\(\s*\)|\[\s*\]", " ", t)
+    t = re.sub(r"[ \t]+([.,;:!?])", r"\1", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def title_from_summary(summary: str, max_len: int = 120) -> str:
+    s = strip_links(summary)
+    m = re.match(r"^(.+?[.!?])(?:\s|$)", s)
+    t = re.sub(r"[.!?]+$", "", m.group(1) if m else s).strip()
+    if len(t) > max_len:
+        cut = t[: max_len + 1]
+        sp = cut.rfind(" ")
+        t = re.sub(r"[\s,;:]+$", "", cut[:sp] if sp > 40 else t[:max_len]) + "..."
+    return t
+
+
+def public_title(title: str, summary: str) -> str:
+    t = "" if BARE_URL_TITLE.match(title) else strip_links(title)
+    return (t or title_from_summary(summary))[:200]
+
+
+def source_key(url: str) -> str:
+    """Same page, whatever the www., trailing slash or utm_ parameters (mirrors sourceKey in worker/src/search.ts)."""
+    u = urllib.parse.urlsplit(url)
+    host = (u.hostname or "").lower()
+    host = host[4:] if host.startswith("www.") else host
+    q = "&".join(f"{k}={v}" for k, v in urllib.parse.parse_qsl(u.query, keep_blank_values=True) if not k.lower().startswith("utm_"))
+    return f"{host}{u.path.rstrip('/')}" + (f"?{q}" if q else "")
+
+
+def _tokens(d: dict) -> frozenset[str]:
+    return frozenset(re.findall(r"[a-z0-9]+", f"{d['title']} {d['summary']}".lower()))
+
+
+def dedupe(docs: list[dict], threshold: float = 0.9) -> tuple[list[dict], list[tuple[str, str]]]:
+    """Within each vertical keep one doc per source page and drop near-identical title + summary (token Jaccard
+    >= threshold). The kept doc is the one with the longest summary (ties: smallest id). Returns (kept, [(dropped, kept)])."""
+    dropped: list[tuple[str, str]] = []
+    by_vertical: dict[str, list[dict]] = {}
+    for d in docs:
+        by_vertical.setdefault(d["vertical"], []).append(d)
+    kept_all: list[dict] = []
+    for _v, group in sorted(by_vertical.items()):
+        group = sorted(group, key=lambda d: (-len(d["summary"]), d["id"]))
+        by_src: dict[str, dict] = {}
+        first_pass: list[dict] = []
+        for d in group:
+            k = source_key(d["source_url"])
+            if k in by_src:
+                dropped.append((d["id"], by_src[k]["id"]))
+                continue
+            by_src[k] = d
+            first_pass.append(d)
+        kept: list[tuple[dict, frozenset[str]]] = []
+        for d in first_pass:
+            tok = _tokens(d)
+            twin = None
+            for other, otok in kept:
+                lo, hi = sorted((len(tok), len(otok)))
+                if not hi or lo / hi < threshold:
+                    continue
+                if len(tok & otok) / len(tok | otok) >= threshold:
+                    twin = other
+                    break
+            if twin:
+                dropped.append((d["id"], twin["id"]))
+            else:
+                kept.append((d, tok))
+        kept_all.extend(d for d, _ in kept)
+    return kept_all, dropped
+
+
 def content_hash(vertical: str, title: str, summary: str, source_url: str) -> str:
     raw = "\x1f".join([EMBED_MODEL, EMBED_POOLING, vertical, title, summary, source_url])
     return hashlib.sha256(raw.encode()).hexdigest()
@@ -91,10 +189,10 @@ def gate_row(vertical: str, row: dict, allowed: set[str], excluded: list[str]) -
     url = (row.get("source_url") or "").strip()
     if not is_allowed_source(url, allowed, excluded):
         return None
-    summary = (row.get("summary") or "").strip()[:1200]
+    summary = strip_links(row.get("summary") or "")[:1200].strip()
     if not summary:
         return None
-    title = (row.get("title") or "").strip()[:200]
+    title = public_title((row.get("title") or "").strip(), summary)
     vid = f"{vertical}_{row['id']}"
     if len(vid.encode()) > 64:  # Vectorize id limit
         return None
@@ -243,6 +341,49 @@ def fetch_supabase(sb_key: str, rest: str, verticals: list[str]) -> dict[str, li
     return out
 
 
+SELECT_SQL = (
+    "SELECT json_build_object('id', id, 'title', title, 'summary', summary, 'source_url', source_url, "
+    "'audit_status', audit_status) FROM public.{table} WHERE audit_status = 'recurated' ORDER BY id"
+)
+
+
+def pg_env(uri: str) -> dict[str, str]:
+    """libpq environment for psql from a postgresql:// URI (keeps the password out of argv)."""
+    u = urllib.parse.urlsplit(uri)
+    if u.scheme not in ("postgres", "postgresql") or not u.hostname or not u.username:
+        sys.exit("PG_CONN_FILE must hold a postgresql://user:password@host:port/db URI")
+    params = dict(urllib.parse.parse_qsl(u.query))
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PG")}
+    env.update({
+        "PGHOST": u.hostname,
+        "PGPORT": str(u.port or 5432),
+        "PGUSER": urllib.parse.unquote(u.username),
+        "PGPASSWORD": urllib.parse.unquote(u.password or ""),
+        "PGDATABASE": (u.path or "/postgres").lstrip("/") or "postgres",
+        "PGSSLMODE": params.get("sslmode", "require"),
+        "PGCONNECT_TIMEOUT": "20",
+        "PGAPPNAME": "kb_v2_sync",
+    })
+    return env
+
+
+def fetch_postgres(uri: str, verticals: list[str]) -> dict[str, list[dict]]:
+    env = pg_env(uri)
+    out: dict[str, list[dict]] = {}
+    for v in verticals:
+        if v not in VERTS:
+            raise ValueError(v)
+        r = subprocess.run(
+            ["psql", "-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c", "SET statement_timeout = '60s'", "-c", SELECT_SQL.format(table=f"{v}_kb")],
+            env=env, capture_output=True, text=True, timeout=180,
+        )
+        if r.returncode != 0:
+            # psql errors never contain the password (it is not in argv or the URI we pass)
+            raise RuntimeError(f"psql read of {v}_kb failed: {r.stderr.strip()[:300]}")
+        out[v] = [json.loads(line) for line in r.stdout.splitlines() if line.strip()]
+    return out
+
+
 # ── main ──────────────────────────────────────────────────────────────────────────────────────────────
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -272,17 +413,27 @@ def main(argv: list[str] | None = None) -> int:
     if "vertical" not in cf.metadata_indexes():
         sys.exit(f"index {cf.index} has no `vertical` metadata index: create it BEFORE the first upsert (RUNBOOK step 3)")
 
-    raw = fetch_supabase(read_secret("SB_KEY_FILE", "/root/.sbkey"), rest, VERTS)
-    eligible: dict[str, dict] = {}
+    if os.environ.get("PG_CONN_FILE"):
+        raw = fetch_postgres(read_secret("PG_CONN_FILE", ""), VERTS)
+        source = "postgres (kb_sync_reader)"
+    else:
+        raw = fetch_supabase(read_secret("SB_KEY_FILE", "/root/.sbkey"), rest, VERTS)
+        source = "postgrest (legacy key)"
+    gated: list[dict] = []
     skipped = 0
     for v, rows in raw.items():
         for r in rows:
             d = gate_row(v, r, allowed, excluded)
             if d:
-                eligible[d["id"]] = d
+                gated.append(d)
             else:
                 skipped += 1
-    print(f"supabase: {sum(len(r) for r in raw.values())} recurated rows, {len(eligible)} eligible, {skipped} gated out", flush=True)
+    kept, dupes = dedupe(gated)
+    eligible: dict[str, dict] = {d["id"]: d for d in kept}
+    retitled = sum(1 for v, rows in raw.items() for r in rows if BARE_URL_TITLE.match(r.get("title") or "") or not (r.get("title") or "").strip())
+    print(f"supabase via {source}: {sum(len(r) for r in raw.values())} recurated rows, {len(gated)} pass the gate, "
+          f"{skipped} gated out, {len(dupes)} near-duplicates dropped, {retitled} titles derived from the summary, "
+          f"{len(eligible)} eligible", flush=True)
 
     stored = len(eligible) * EMBED_DIMS
     if stored > FREE_STORED_DIMS and not a.allow_over_free:
@@ -295,7 +446,8 @@ def main(argv: list[str] | None = None) -> int:
     if guard:
         sys.exit(f"refusing to delete: {guard}")
     if a.dry_run:
-        print(json.dumps({"dry_run": True, "eligible": len(eligible), "upsert": len(upserts), "delete": len(deletes),
+        print("sample duplicates (dropped -> kept):", dupes[:5], flush=True)
+        print(json.dumps({"dry_run": True, "eligible": len(eligible), "duplicates": len(dupes), "upsert": len(upserts), "delete": len(deletes),
                           "stored_dims": stored, "est_neurons": round(sum(len(embed_text(d)) for d in upserts) / 4 / 1e6 * NEURONS_PER_M_TOKENS)}))
         return 0
 

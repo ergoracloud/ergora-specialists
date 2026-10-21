@@ -1,0 +1,18 @@
+{
+  "_doc": "Parity cases for link stripping and title derivation. Used by worker/test/unit.test.ts (policy.ts) and sync/test_kb_v2_sync.py (kb_v2_sync.py).",
+  "strip": [
+    ["Read [the guide](https://example.com/guide) first.", "Read the guide first."],
+    ["See https://www.gorgias.com/blog for more.", "See for more."],
+    ["Details at <https://example.com/x> and www.example.org/y today", "Details at and today"],
+    ["![chart](https://img.example.com/a.png) Growth doubled.", "chart Growth doubled."],
+    ["Plain text stays as is.", "Plain text stays as is."],
+    ["Pricing (https://example.com/p) matters.", "Pricing matters."]
+  ],
+  "titles": [
+    ["https://www.gorgias.com/blog", "Automated replies cut first response time by half. Teams also saw higher CSAT.", "Automated replies cut first response time by half"],
+    ["  www.demandcurve.com/blog ", "Test one variable at a time! Then scale the winner.", "Test one variable at a time"],
+    ["Pricing your SaaS", "Value based pricing wins.", "Pricing your SaaS"],
+    ["", "No sentence end here", "No sentence end here"],
+    ["[Cold email](https://close.com/x) guide", "Short emails win.", "Cold email guide"]
+  ]
+}
