@@ -24,7 +24,7 @@ index_name = "ergora-kb-v2"
 [[d1_databases]]
 binding = "KB_FTS"
 database_name = "ergora-kb-fts"
-database_id = "00000000-0000-0000-0000-000000000000"
+database_id = "09b7f3c2-a339-42db-9fee-f6e393393649"
 migrations_dir = "migrations"
 
 # Counters, response cache, alert flags, lead confirmations. SQLite-backed (the only DO type on Free).
