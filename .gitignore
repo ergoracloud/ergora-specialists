@@ -5,3 +5,5 @@ mcp/README.md
 .dev.vars
 *.log
 .DS_Store
+sync/eval_out/
+__pycache__/
