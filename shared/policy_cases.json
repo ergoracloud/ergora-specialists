@@ -1,0 +1,23 @@
+{
+ "_comment": "Parity cases: worker/test/unit.test.ts and sync/test_kb_v2_sync.py must both agree with these.",
+ "cases": [
+  ["https://www.lennysnewsletter.com/p/x", true],
+  ["https://lennysnewsletter.com/p/x", true],
+  ["https://WWW.Close.com/blog/cold-email", true],
+  ["http://lennysnewsletter.com/p/x", false],
+  ["javascript:alert(1)", false],
+  ["data:text/html,hi", false],
+  ["https://user:pw@lennysnewsletter.com/", false],
+  ["https://lennysnewsletter.com:8443/", false],
+  ["https://hbr.org/2020/01/x", false],
+  ["https://www.hbr.org/2020/01/x", false],
+  ["https://github.com/a/b", false],
+  ["https://someone.github.io/x", false],
+  ["https://raw.githubusercontent.com/a", false],
+  ["https://alleged-peace.flywheelsites.com/x", false],
+  ["https://attacker.wordpress.com/", false],
+  ["https://evil.example.com/", false],
+  ["ui-ux-pro-max://products/30", false],
+  ["", false]
+ ]
+}

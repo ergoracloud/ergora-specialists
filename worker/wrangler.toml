@@ -1,35 +1,69 @@
+# ergora-specialists-gateway: built for the Cloudflare Workers FREE plan ($0/month).
+# Budgets and the limit math: ../docs/COSTS.md. Deploy order: ../docs/RUNBOOK_v2.md.
 name = "ergora-specialists-gateway"
-main = "src/index.js"
-compatibility_date = "2026-09-01"
+main = "src/index.ts"
+compatibility_date = "2026-10-01"
 account_id = "c9edb4c8373162e323c2718a364afc62"
 workers_dev = true
 
-# Isolated public KB store — NEVER the prod Supabase.
+[observability]
+enabled = true
+
+# Query embeddings (bge-small-en-v1.5, 384d). Free: 10,000 neurons/day; this service needs ~150/day at the cap.
+[ai]
+binding = "AI"
+
+# Isolated public KB store. NEVER the prod Supabase. Created by RUNBOOK step 3 (dimensions 384, cosine,
+# `vertical` metadata index BEFORE the first upsert).
 [[vectorize]]
 binding = "KB"
-index_name = "ergora-kb"
+index_name = "ergora-kb-v2"
 
-# Rate-limit counters + lead records (per-email).
-[[kv_namespaces]]
-binding = "GATE"
-id = "e598a514ed624f4eb6a9f31c3400990d"
+# Keyword fallback + sync manifest. Created by RUNBOOK step 4; paste the id printed by
+# `wrangler d1 create ergora-kb-fts` (scripts/preflight.mjs refuses to deploy until it is a real id).
+[[d1_databases]]
+binding = "KB_FTS"
+database_name = "ergora-kb-fts"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+# Counters, response cache, alert flags, lead confirmations. SQLite-backed (the only DO type on Free).
+[[durable_objects.bindings]]
+name = "GATE_DO"
+class_name = "Gate"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Gate"]
 
 [vars]
-DAILY_LIMIT = "30"          # per email per UTC day (free tier)
-ANON_LIMIT = "5"            # per IP per UTC day when no email is supplied (remote MCP without headers)
-IP_DAILY_LIMIT = "200"      # ceiling per IP per day even WITH emails — one host can't rotate emails for unlimited use
-GLOBAL_DAILY_LIMIT = "20000" # kill-switch across all callers (~$0.40/day worst case: Vertex embeds + Vectorize)
-BURST_LIMIT = "30"          # informational; the real value is the [[ratelimits]] block below
-
+GLOBAL_DAILY_LIMIT = "2500"     # service-wide queries per UTC day (Tom 2026-10-21). Alerts at ALERT_THRESHOLD_PCT and at 100%
+ALERT_THRESHOLD_PCT = "80"
+DAILY_LIMIT = "30"              # per email per UTC day
+ANON_LIMIT = "5"                # per IP (IPv6: per /64) per day without an email
+IP_DAILY_LIMIT = "200"          # per network per day even with emails, so one host can't rotate addresses
+# Hosted AI clients share a few egress IPs (Claude: https://claude.com/docs/connectors/building/authentication).
+POOLED_CIDRS = '["160.79.104.0/21"]'
+POOL_ANON_LIMIT = "250"         # per pool per day, anonymous
+POOL_IP_DAILY_LIMIT = "1000"    # per pool per day, emails included
+# Vectorize Free: 30M queried dims/month = (stored + queries) x 384. 78,125 - ~9,000 stored - 1,440 health = ~67,600.
+VECTORIZE_MONTHLY_QUERY_BUDGET = "66000"
+D1_DAILY_ROWS_READ_BUDGET = "4000000"   # D1 Free: 5M rows read/day; keyword fallback stops at 4M
+CACHE_TTL_SEC = "86400"         # identical queries answered from the Gate cache for 24 h (KB syncs weekly)
+CONFIRM_DAILY_LIMIT = "100"     # max confirmation emails a day
+HEALTH_TTL_SEC = "300"
+HEALTH_QUERY_TTL_SEC = "1800"
 ATTRIBUTION_URL = "https://ergora.app"
-GCP_PROJECT = "ergora-492323"
-GCP_LOCATION = "us-central1"
+PUBLIC_BASE_URL = ""            # e.g. "https://mcp.ergora.app" once a custom domain exists; empty = request origin
+UPTIME_HUB_URL = "https://uptime-hub.contact-c9e.workers.dev"
+LOOPS_CONFIRM_TEMPLATE_ID = ""  # Loops transactional id for "confirm your email" (data variable: confirmUrl). Empty = no lead emails, no Loops contacts
 
-# Secrets (set with `wrangler secret put`):
-#   GCP_SA_JSON   - Google service-account JSON (Vertex embeddings)
-#   LOOPS_API_KEY - Loops (lead capture)
+# Secrets (`wrangler secret put`):
+#   LOOPS_API_KEY     Loops (confirmation email + contact on confirm)
+#   UPTIME_HUB_TOKEN  bearer token of the `ergora-specialists` source on uptime-hub
+# GCP_SA_JSON is no longer used: delete it after the v2 deploy (RUNBOOK step 9).
 
-# Edge burst limiter (sliding window per caller key: email or IP). Stops parallel floods and KV counter races.
+# Edge burst limiter (per caller key: email, IP or pool). MUST stay after the whole [vars] block.
 [[ratelimits]]
 name = "BURST"
 namespace_id = "1001"
