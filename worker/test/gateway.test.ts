@@ -127,7 +127,7 @@ describe("quotas and the daily cap", () => {
   it("alerts at 80% and at the cap once each, then refuses politely without touching backends", async () => {
     const f = stubFetch();
     const m = mocks();
-    const e = testEnv(m); // GLOBAL_DAILY_LIMIT=10 in wrangler.test.toml
+    const e = testEnv(m, { GLOBAL_RESERVE_PCT: "0" }); // GLOBAL_DAILY_LIMIT=10 in wrangler.test.toml
     for (let i = 0; i < 10; i++) {
       const r = await postQuery(e, { query: `cap ${i}` }, { email: `u${i}@b.co`, ip: `198.51.100.${i}` });
       expect(r.status).toBe(200);
@@ -151,7 +151,7 @@ describe("email confirmation before Loops", () => {
   it("sends a confirmation email (no PII in the link) and only creates the contact after POST /confirm", async () => {
     const f = stubFetch();
     const e = testEnv(mocks());
-    await postQuery(e, { query: "hiring plan", vertical: "hr" }, { email: "Lead@Example.com" });
+    await postQuery(e, { query: "hiring plan", vertical: "hr", subscribe: true }, { email: "Lead@Example.com" });
     const tx = f.calls.find((c) => c.url === "https://app.loops.so/api/v1/transactional");
     expect(tx).toBeTruthy();
     const confirmUrl = (tx!.body as { dataVariables: { confirmUrl: string } }).dataVariables.confirmUrl;
@@ -182,7 +182,7 @@ describe("email confirmation before Loops", () => {
   it("does not email undeliverable domains", async () => {
     const f = stubFetch((url) => (url.includes("dns-query") ? Response.json({ Status: 3 }) : undefined));
     const e = testEnv(mocks());
-    await postQuery(e, { query: "x" }, { email: "who@nowhere-at-all.invalid" });
+    await postQuery(e, { query: "x", subscribe: true }, { email: "who@nowhere-at-all.invalid" });
     expect(f.calls.some((c) => c.url.includes("loops.so"))).toBe(false);
   });
 

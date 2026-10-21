@@ -8,6 +8,7 @@ export type PublicCode =
   | "REQUEST_TOO_LARGE"
   | "RATE_LIMITED"
   | "DAILY_LIMIT_REACHED"
+  | "TOO_MANY_EMAILS"
   | "SERVICE_DAILY_LIMIT"
   | "UPSTREAM_UNAVAILABLE"
   | "NOT_FOUND"
@@ -19,6 +20,7 @@ export const STATUS: Record<PublicCode, number> = {
   REQUEST_TOO_LARGE: 413,
   RATE_LIMITED: 429,
   DAILY_LIMIT_REACHED: 429,
+  TOO_MANY_EMAILS: 429,
   SERVICE_DAILY_LIMIT: 429,
   UPSTREAM_UNAVAILABLE: 503,
   NOT_FOUND: 404,
@@ -47,9 +49,21 @@ export function publicError(env: Env, code: PublicCode, extra: { limit?: number;
       const hint = anon
         ? ` Add an email to unlock ${num(env, "DAILY_LIMIT", 30)} free queries a day (X-Ergora-Email header, ERGORA_EMAIL, or the \`email\` tool argument).`
         : "";
-      const scope = extra.kind === "email" ? "your free daily limit" : "the free daily limit for this network";
-      return { code, error: `You have reached ${scope} (${extra.limit ?? ""} queries). Please try again tomorrow.${hint}`, upgrade: upgradeLine(env) };
+      const scope =
+        extra.kind === "email"
+          ? "your free daily limit"
+          : extra.kind === "unconfirmed"
+            ? "the free daily limit for unconfirmed emails on this network"
+            : "the free daily limit for this network";
+      const count = extra.limit ? ` (${extra.limit} queries)` : "";
+      return { code, error: `You have reached ${scope}${count}. Please try again tomorrow.${hint}`, upgrade: upgradeLine(env) };
     }
+    case "TOO_MANY_EMAILS":
+      return {
+        code,
+        error: `Too many different emails have been used from this network today (the limit is ${extra.limit ?? 3}). Please keep using the same email, or try again tomorrow.`,
+        upgrade: upgradeLine(env),
+      };
     case "RATE_LIMITED":
       return { code, error: "Too many requests in a short time. Please slow down (about 30 a minute is the ceiling) and try again." };
     case "UPSTREAM_UNAVAILABLE":

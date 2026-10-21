@@ -1,6 +1,9 @@
 // Double opt-in before anything reaches Loops.
-// 1. A query with a new email -> the Gate claims a confirmation slot (once per address per 30 days, and at most
-//    CONFIRM_DAILY_LIMIT emails a day overall) -> MX/A check -> Loops transactional "confirm your address" email.
+// 1. Only after real use: the Gate marks an email eligible after 3 queries across 2 UTC days, or when the caller
+//    explicitly asks (the `subscribe` argument). Then the MX/A check runs FIRST (undeliverable addresses are
+//    remembered for 30 days and never use a slot), then the Gate claims a slot (once per address per 30 days,
+//    CONFIRM_DAILY_LIMIT a day overall, CONFIRM_NET_DAILY_LIMIT a day per network) -> Loops transactional
+//    "confirm your address" email.
 // 2. The link opens GET /confirm (a page with a button, so mail scanners that prefetch links confirm nothing).
 // 3. POST /confirm -> the Gate marks the lead confirmed (single-use token) -> Loops contact created (mcp-lead).
 // The link carries only a random token; the email address never appears in a URL.
@@ -37,26 +40,43 @@ export async function hasMailDomain(domain: string): Promise<boolean> {
   return false;
 }
 
+export interface ConfirmTarget {
+  email: string; // normalised mailbox (lead key)
+  addr: string; // address as given, where the email is sent
+  netKey: string; // network (or pool + IP) for the per-network daily limit
+}
+
+// Call only when the Gate said the address is eligible (AdmitResult.confirmEligible).
 export async function startConfirmation(
-  env: Env, gate: DurableObjectStub<Gate>, email: string, vertical: string, base: string, now = Date.now(),
+  env: Env, gate: DurableObjectStub<Gate>, who: ConfirmTarget, vertical: string, base: string, now = Date.now(),
 ): Promise<void> {
   if (!confirmationConfigured(env)) return; // nothing is stored until Loops is set up
+  if (!(await hasMailDomain(who.addr.split("@")[1] || ""))) {
+    await gate.markUndeliverable(who.email, now);
+    return;
+  }
   const bytes = crypto.getRandomValues(new Uint8Array(32));
   const token = hex(bytes);
   const tokenHash = await sha256Hex(token);
-  const claimed = await gate.claimConfirmation(email, vertical, now, num(env, "CONFIRM_DAILY_LIMIT", 100), tokenHash, TOKEN_TTL_SEC);
+  const claimed = await gate.claimConfirmation({
+    email: who.email,
+    addr: who.addr,
+    vertical,
+    now,
+    dailyLimit: num(env, "CONFIRM_DAILY_LIMIT", 100),
+    netKey: who.netKey,
+    netDailyLimit: num(env, "CONFIRM_NET_DAILY_LIMIT", 2),
+    tokenHash,
+    tokenTtlSec: TOKEN_TTL_SEC,
+  });
   if (!claimed) return;
-  if (!(await hasMailDomain(email.split("@")[1] || ""))) {
-    await gate.markUndeliverable(email);
-    return;
-  }
   try {
     const res = await fetch("https://app.loops.so/api/v1/transactional", {
       method: "POST",
       headers: { authorization: `Bearer ${env.LOOPS_API_KEY}`, "content-type": "application/json" },
       body: JSON.stringify({
         transactionalId: env.LOOPS_CONFIRM_TEMPLATE_ID,
-        email,
+        email: who.addr,
         dataVariables: { confirmUrl: `${base}/confirm?t=${token}` },
       }),
       signal: AbortSignal.timeout(5000),
@@ -64,7 +84,7 @@ export async function startConfirmation(
     if (!res.ok) throw new Error(`loops transactional ${res.status}`);
   } catch (e) {
     console.error("confirmation email not sent:", (e as Error)?.message);
-    await gate.releaseClaim(email, tokenHash);
+    await gate.releaseClaim(who.email, tokenHash, who.netKey, now);
   }
 }
 
@@ -125,7 +145,7 @@ export async function handleConfirm(request: Request, env: Env, gate: DurableObj
   const tokenHash = await sha256Hex(t);
   const lead = await gate.confirm(tokenHash, Date.now());
   if (!lead) return page("Link expired", "<p>This link has expired or was already used.</p>", 410);
-  if (!(await createLoopsContact(env, lead.email, lead.firstVertical))) {
+  if (!(await createLoopsContact(env, lead.addr, lead.firstVertical))) {
     await gate.unconfirm(lead.email, tokenHash, Date.now());
     return page("Please try again", "<p>We could not save that just now. Please use the same link again in a minute.</p>", 503);
   }

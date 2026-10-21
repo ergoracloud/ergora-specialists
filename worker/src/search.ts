@@ -18,6 +18,24 @@ export function withTimeout<T>(p: Promise<T>, ms: number, component: UpstreamErr
   });
 }
 
+// One result per source page (the same article can be stored under several verticals, with near-identical
+// summaries); results arrive best first, so the first one wins.
+export function sourceKey(url: string): string {
+  try {
+    const u = new URL(url);
+    const q = [...u.searchParams].filter(([k]) => !k.toLowerCase().startsWith("utm_")).map(([k, v]) => `${k}=${v}`).join("&");
+    return `${u.hostname.toLowerCase().replace(/^www\./, "")}${u.pathname.replace(/\/+$/, "")}${q ? `?${q}` : ""}`;
+  } catch {
+    return url;
+  }
+}
+function addUnique(seen: Set<string>, r: PublicResult): boolean {
+  const key = sourceKey(r.source_url);
+  if (seen.has(key)) return false;
+  seen.add(key);
+  return true;
+}
+
 export function normaliseQuery(q: string): string {
   return q.toLowerCase().replace(/\s+/g, " ").trim().replace(/[?!.,;:]+$/, "").slice(0, LIMITS.MAX_QUERY_CHARS);
 }
@@ -60,9 +78,10 @@ export async function semanticSearch(env: Env, query: string, vertical: string |
     throw new UpstreamError("vectorize", (e as Error)?.message || "query failed");
   }
   const out: PublicResult[] = [];
+  const seen = new Set<string>();
   for (const m of r.matches || []) {
     const g = gateResult(m.metadata as Record<string, unknown>, m.score ?? 0, vertical, true);
-    if (g) out.push(g);
+    if (g && addUnique(seen, g)) out.push(g);
     if (out.length >= k) break;
   }
   return out;
@@ -111,9 +130,10 @@ export async function keywordSearch(
     throw new UpstreamError("d1", (e as Error)?.message || "query failed");
   }
   const results: PublicResult[] = [];
+  const seen = new Set<string>();
   for (const row of res.results || []) {
     const g = gateResult(row, null, vertical, false);
-    if (g) results.push(g);
+    if (g && addUnique(seen, g)) results.push(g);
     if (results.length >= k) break;
   }
   return { results, rowsRead: Number(res.meta?.rows_read ?? 0) };
