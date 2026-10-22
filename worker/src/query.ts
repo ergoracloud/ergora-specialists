@@ -75,8 +75,10 @@ export async function burstOk(limiter: RateLimit | undefined, key: string): Prom
   if (!limiter) return true;
   try {
     return (await limiter.limit({ key })).success;
-  } catch {
-    return true; // the limiter is a best-effort edge guard; the Gate still enforces the daily quotas
+  } catch (e) {
+    // Fail open: the limiter is a best-effort edge guard and the Gate still enforces the daily quotas. Log so a broken binding is visible.
+    console.error("burst limiter error:", (e as Error)?.name, (e as Error)?.message);
+    return true;
   }
 }
 
