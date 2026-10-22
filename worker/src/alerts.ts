@@ -1,5 +1,8 @@
 // Alerts go through the existing outage channel: the uptime-hub Worker (POST /v1/events), which stores the
 // event, shows it on tomosborne.me/admin/alerts and sends it to Tom's Telegram when notify is true.
+// Delivery uses the UPTIME_HUB service binding: a plain fetch() from one workers.dev Worker to another on the same
+// account is refused by Cloudflare (error 1042, seen as HTTP 404), which is why no alert reached the hub before 0.4.3.
+// Plain fetch() stays as the fallback for a hub on another account or a custom domain (and for the tests).
 // The Gate DO decides "at most once per day per threshold"; the hub's dedupe_key is a second guard.
 import { num, type Env } from "./config";
 import type { AlertKind, Gate } from "./gate";
@@ -25,7 +28,8 @@ export async function sendHub(env: Env, ev: HubEvent): Promise<number | null> {
   }
   const url = `${(env.UPTIME_HUB_URL || DEFAULT_HUB).replace(/\/+$/, "")}/v1/events`;
   try {
-    const res = await fetch(url, {
+    const send = env.UPTIME_HUB ? (u: string, i: RequestInit) => env.UPTIME_HUB!.fetch(u, i) : fetch;
+    const res = await send(url, {
       method: "POST",
       headers: { authorization: `Bearer ${env.UPTIME_HUB_TOKEN}`, "content-type": "application/json" },
       body: JSON.stringify({ events: [{ ...ev, target: "ergora-specialists" }] }),

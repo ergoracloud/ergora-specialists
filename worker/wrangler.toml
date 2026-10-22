@@ -36,6 +36,12 @@ class_name = "Gate"
 tag = "v1"
 new_sqlite_classes = ["Gate"]
 
+# Alerts: uptime-hub is on this account, and Cloudflare refuses a fetch() from one workers.dev Worker to another
+# (error 1042, HTTP 404), so alerts go over a service binding. UPTIME_HUB_URL only sets the path and Host.
+[[services]]
+binding = "UPTIME_HUB"
+service = "uptime-hub"
+
 [vars]
 GLOBAL_DAILY_LIMIT = "2500"     # service-wide queries per UTC day (Tom 2026-10-21). Alerts at ALERT_THRESHOLD_PCT and at 100%
 GLOBAL_RESERVE_PCT = "30"       # share of the global cap only confirmed emails and the hosted-client pool can use

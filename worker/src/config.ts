@@ -1,6 +1,6 @@
 // Static configuration shared by every module. Runtime knobs live in wrangler.toml [vars].
 
-export const SERVER_VERSION = "0.4.2";
+export const SERVER_VERSION = "0.4.3";
 export const MCP_VERSIONS = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
 // Embedding model. MUST match sync/kb_v2_sync.py (same model, same pooling, documents without the
@@ -66,6 +66,8 @@ export interface Env {
   KB: VectorizeIndex;
   KB_FTS: D1Database;
   GATE_DO: DurableObjectNamespace<import("./gate").Gate>;
+  /** service binding to the uptime-hub Worker (same account: workers.dev fetches between them are refused) */
+  UPTIME_HUB?: Fetcher;
   GATE_NAME?: string; // Durable Object instance name (tests use one per case); default "gate"
 
   // vars
