@@ -67,3 +67,21 @@ describe("admin alert test", () => {
     expect((await post(e, "Bearer short")).status).toBe(404);
   });
 });
+
+describe("hub delivery", () => {
+  it("uses the UPTIME_HUB service binding when it is bound", async () => {
+    const f = stubFetch();
+    const seen: Array<{ url: string; auth: string | null }> = [];
+    const binding = {
+      fetch: vi.fn(async (u: string, i: RequestInit) => {
+        seen.push({ url: u, auth: new Headers(i.headers).get("authorization") });
+        return Response.json({ ok: true, ids: [9] });
+      }),
+    } as unknown as Fetcher;
+    const e = testEnv(mocks(), { ADMIN_TOKEN: TOKEN, UPTIME_HUB: binding });
+    const r = await post(e, `Bearer ${TOKEN}`);
+    expect(await r.json()).toMatchObject({ ok: true, hub_status: 200 });
+    expect(seen).toEqual([{ url: "https://hub.example.test/v1/events", auth: "Bearer test-hub-token" }]);
+    expect(f.hub()).toHaveLength(0);
+  });
+});
