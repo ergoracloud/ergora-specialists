@@ -6,15 +6,18 @@
 //   GET  /health/deep  Workers AI + Vectorize + D1 checks (memoised; for the uptime monitor)
 //   GET  /verticals    list of vertical slugs
 //   GET|POST /confirm  email double opt-in (Loops)
+//   POST /admin/alert-test  one labelled test event to the uptime hub (ADMIN_TOKEN; 404 otherwise)
 // Query path: Workers AI bge-small-en-v1.5 (384d) -> Vectorize `ergora-kb-v2`, D1 FTS5 `ergora-kb-fts` fallback.
 // Reads ONLY these isolated Cloudflare stores. Never touches production Supabase, never calls Google.
+import { handleAlertTest } from "./admin";
 import { baseUrl, LIMITS, SERVER_VERSION, VERTICALS, type Env } from "./config";
 import { publicError, STATUS } from "./errors";
 import { deepHealth } from "./health";
 import { handleConfirm } from "./leads";
 import { handleMcp } from "./mcp";
 import { networkKey } from "./net";
-import { burstOk, gateStub, runQuery } from "./query";
+import { blockLocal, localMinuteOk, retryAfterSec } from "./minute";
+import { gateStub, healthLimit, runQuery } from "./query";
 
 export { Gate } from "./gate";
 
@@ -51,13 +54,20 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
       });
 
     case "/health/deep": {
-      // Memoised and single-flight in the Gate; the limiter stops one network from hammering it.
+      // Memoised and single-flight in the Gate. HEALTH_PER_MINUTE (10) per network: an isolate-local counter first,
+      // then the authoritative counter inside the Gate call the probe makes anyway (no extra DO request).
       // The KVM2 uptime monitor probes once a minute from one IP, far below this.
-      const ip = request.headers.get("cf-connecting-ip") || "";
-      if (!(await burstOk(env.HEALTH_BURST ?? env.BURST, `health|${networkKey(ip)}`))) {
-        return json(publicError(env, "RATE_LIMITED"), STATUS.RATE_LIMITED, { "cache-control": "no-store", "retry-after": "60" });
+      const now = Date.now();
+      const limit = healthLimit(env);
+      const key = `h|${networkKey(request.headers.get("cf-connecting-ip") || "")}`;
+      const limited = () =>
+        json(publicError(env, "RATE_LIMITED"), STATUS.RATE_LIMITED, { "cache-control": "no-store", "retry-after": String(retryAfterSec(now)) });
+      if (!localMinuteOk(key, limit, now)) return limited();
+      const h = await deepHealth(env, ctx, { key, limit }, now);
+      if (!h) {
+        blockLocal(key, limit, now);
+        return limited();
       }
-      const h = await deepHealth(env, ctx);
       return json(h, h.ok ? 200 : 503, { "cache-control": "no-store" });
     }
 
@@ -88,7 +98,13 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
         optIn: body.subscribe === true,
         base,
       });
-      return json(r.body, r.status);
+      return json(r.body, r.status, "retryAfter" in r && r.retryAfter ? { "retry-after": String(r.retryAfter) } : {});
+    }
+
+    case "/admin/alert-test": {
+      const res = await handleAlertTest(request, env);
+      if (res) return res;
+      break;
     }
   }
   return json({ ...publicError(env, "NOT_FOUND"), routes: ["POST /mcp", "GET /health", "GET /health/deep", "GET /verticals", "POST /query {query, vertical?, email?, topK?, subscribe?}"] }, 404);

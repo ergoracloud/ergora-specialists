@@ -3,10 +3,12 @@
 // call at a time the counters have no read-then-write race (the old KV counters did).
 //
 // Free plan budget (https://developers.cloudflare.com/durable-objects/platform/pricing/): 100,000 requests,
-// 100,000 rows written and 5M rows read per day. An admitted query costs 2 DO calls and about 5 row writes,
-// so 2,500 queries/day use about 5,000 requests and 12,500 writes. Rejections write nothing.
+// 100,000 rows written and 5M rows read per day. An admitted query costs 2 DO calls and about 6 row writes
+// (including the per-minute counter), so 2,500 queries/day use about 5,000 requests and 15,000 writes.
+// Rejections write nothing. /health/deep costs 1 DO call and 1 row write per probe (its per-minute counter).
 import { DurableObject } from "cloudflare:workers";
 import type { Env } from "./config";
+import { WINDOW_MS, windowStart } from "./minute";
 
 export type AlertKind = "cap_warning" | "cap_reached" | "vector_budget" | "keyword_budget";
 
@@ -33,9 +35,16 @@ export interface AdmitInput {
   cacheKey: string;
   vectorBudget: number;
   d1RowsBudget: number;
+  /** per-network per-minute limit, checked first; omitted when this HTTP request already passed it (MCP batch) */
+  minute?: MinuteCheck;
 }
 
-export type RejectReason = "global" | "open" | "net" | "anon" | "unconfirmed" | "secondary" | "emails" | "email";
+export interface MinuteCheck {
+  key: string;
+  limit: number;
+}
+
+export type RejectReason = "minute" | "global" | "open" | "net" | "anon" | "unconfirmed" | "secondary" | "emails" | "email";
 
 export interface AdmitResult {
   ok: boolean;
@@ -123,6 +132,18 @@ export class Gate extends DurableObject<Env> {
     );
     return this.count(k);
   }
+  // Per-network fixed-window minute counter. Full = this window is used up.
+  private minuteKey(m: MinuteCheck, now: number): string {
+    return `mi:${windowStart(now)}:${m.key}`;
+  }
+  private minuteFull(m: MinuteCheck, now: number): boolean {
+    return this.count(this.minuteKey(m, now)) >= m.limit;
+  }
+  private minuteBump(m: MinuteCheck, now: number): void {
+    // expires with the window; the daily alarm deletes it
+    this.bump(this.minuteKey(m, now), 1, windowStart(now) + 2 * WINDOW_MS);
+  }
+
   // Returns true the first time a flag is raised inside its lifetime.
   private raise(k: string, now: number, exp: number): boolean {
     const hit = this.sql.exec("SELECT 1 FROM flags WHERE k = ? AND exp > ?", k, now).toArray().length > 0;
@@ -146,6 +167,7 @@ export class Gate extends DurableObject<Env> {
       ok: false, reason, refusedKey, confirmed, confirmEligible: false, used, limit, globalUsed, cached: null, vector: false, keyword: false, alerts,
     });
 
+    if (i.minute && this.minuteFull(i.minute, i.now)) return reject("minute", i.minute.limit, i.minute.limit, i.minute.key);
     if (globalUsed >= i.globalLimit) {
       if (this.raise(`alert:cap_reached:${day}`, i.now, dayExp)) alerts.push("cap_reached");
       return reject("global", globalUsed, i.globalLimit);
@@ -190,6 +212,7 @@ export class Gate extends DurableObject<Env> {
       if (emailUsed >= emailLimit) return reject("email", emailUsed, emailLimit, i.emailKey);
     }
 
+    if (i.minute) this.minuteBump(i.minute, i.now);
     const g = this.bump(gKey, 1, dayExp);
     if (!priority) this.bump(openKey, 1, dayExp);
     this.bump(netKey, 1, dayExp);
@@ -292,6 +315,12 @@ export class Gate extends DurableObject<Env> {
   }
 
   // ── memo for /health/deep so frequent probes cost almost nothing ──
+  // One call per probe: the per-network minute check plus the memo read.
+  healthPeek(m: MinuteCheck, now: number): { limited: boolean; memo: string | null } {
+    if (this.minuteFull(m, now)) return { limited: true, memo: null };
+    this.minuteBump(m, now);
+    return { limited: false, memo: this.memoGet("health", now) };
+  }
   memoGet(key: string, now: number): string | null {
     const row = this.sql.exec<{ v: string }>("SELECT v FROM cache WHERE k = ? AND exp > ?", `m:${key}`, now).toArray()[0];
     return row ? row.v : null;

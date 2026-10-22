@@ -1,7 +1,8 @@
 // Remote MCP server (Streamable HTTP, stateless JSON responses).
 import { LIMITS, MCP_VERSIONS, num, SERVER_VERSION, SPECIALISTS, VERTICALS, type Env } from "./config";
 import { identify } from "./net";
-import { burstOk, runQuery, type QueryOutcome } from "./query";
+import type { MinuteToken } from "./minute";
+import { openMinute, runQuery, type QueryOutcome } from "./query";
 
 const toolInput = {
   type: "object",
@@ -82,8 +83,8 @@ interface Scope {
   asn: number | null;
   hdrEmail: string;
   base: string;
-  /** a BURST token was already spent for this HTTP request */
-  burstChecked: boolean;
+  /** this HTTP request's minute token (set when it contains tools/call) */
+  minute?: MinuteToken;
 }
 
 type Msg = { jsonrpc?: unknown; id?: unknown; method?: unknown; params?: Record<string, unknown> };
@@ -139,7 +140,7 @@ export async function handleRpc(raw: unknown, s: Scope): Promise<object | null> 
           asn: s.asn,
           optIn: args.subscribe === true,
           base: s.base,
-          burstChecked: s.burstChecked,
+          minute: s.minute,
         });
         const v = typeof vertical === "string" && Object.hasOwn(VERTICALS, vertical) ? vertical : undefined;
         return rpcResult(id, { content: [{ type: "text", text: formatToolText(s.env, r, v) }], isError: r.status !== 200 });
@@ -153,7 +154,7 @@ export async function handleRpc(raw: unknown, s: Scope): Promise<object | null> 
   }
 }
 
-export async function handleMcp(request: Request, scope: Omit<Scope, "ip" | "hdrEmail" | "burstChecked">): Promise<Response> {
+export async function handleMcp(request: Request, scope: Omit<Scope, "ip" | "hdrEmail" | "minute">): Promise<Response> {
   const json = (body: unknown, status = 200, extra: Record<string, string> = {}) =>
     new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...extra } });
   if (request.method === "GET") return new Response("Method Not Allowed: this server uses stateless JSON responses (POST only)", { status: 405, headers: { allow: "POST" } });
@@ -174,20 +175,22 @@ export async function handleMcp(request: Request, scope: Omit<Scope, "ip" | "hdr
     ...scope,
     ip: request.headers.get("cf-connecting-ip") || "",
     hdrEmail: request.headers.get("x-ergora-email") || "",
-    burstChecked: false,
   };
-  // Rate-limit once per HTTP request, before the batch loop, when it does any real work (tools/call).
+  // Rate-limit once per HTTP request, before the batch loop, when it does any real work (tools/call): the
+  // isolate-local check here, the Gate's authoritative counter on the batch's first query (shared token).
   // initialize / tools/list / ping stay free so hosted clients that share egress IPs can always connect.
   const callsTools = msgs.some((m) => m && typeof m === "object" && (m as Msg).method === "tools/call");
   if (callsTools) {
+    const now = Date.now();
     const caller = identify(s.env, s.hdrEmail, s.ip, s.asn);
-    if (!(await burstOk(s.env.BURST, caller.burstKey))) {
+    const minute = openMinute(s.env, caller.burstKey, now);
+    if (minute.state === "limited") {
       const out = msgs
         .filter((m) => m && typeof m === "object" && (m as Msg).id !== undefined && (m as Msg).id !== null)
         .map((m) => rpcError((m as Msg).id, -32000, "Too many requests in a short time. Please slow down and try again."));
-      return json(Array.isArray(body) ? out : (out[0] ?? rpcError(null, -32000, "Too many requests")), 429, { "retry-after": "60" });
+      return json(Array.isArray(body) ? out : (out[0] ?? rpcError(null, -32000, "Too many requests")), 429, { "retry-after": String(minute.retryAfter ?? 60) });
     }
-    s.burstChecked = true;
+    s.minute = minute;
   }
   const out: object[] = [];
   for (const m of msgs) {

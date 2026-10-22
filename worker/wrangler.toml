@@ -61,6 +61,8 @@ CONFIRM_DAILY_LIMIT = "100"     # max confirmation emails a day (sent only after
 CONFIRM_NET_DAILY_LIMIT = "2"   # max confirmation emails a day per network
 HEALTH_TTL_SEC = "300"
 HEALTH_QUERY_TTL_SEC = "1800"
+BURST_PER_MINUTE = "30"         # per network per minute: /query and MCP requests with tools/call (isolate counter + Gate DO)
+HEALTH_PER_MINUTE = "10"        # per network per minute: /health/deep (the KVM2 monitor probes once a minute)
 ATTRIBUTION_URL = "https://ergora.app"
 PUBLIC_BASE_URL = ""            # e.g. "https://mcp.ergora.app" once a custom domain exists; empty = request origin
 UPTIME_HUB_URL = "https://uptime-hub.contact-c9e.workers.dev"
@@ -69,18 +71,8 @@ LOOPS_CONFIRM_TEMPLATE_ID = ""  # Loops transactional id for "confirm your email
 # Secrets (`wrangler secret put`):
 #   LOOPS_API_KEY     Loops (confirmation email + contact on confirm)
 #   UPTIME_HUB_TOKEN  bearer token of the `ergora-specialists` source on uptime-hub
+#   ADMIN_TOKEN       guards POST /admin/alert-test (copy kept on Tom's Mac at ~/.ergora_mcp_admin_token, mode 600)
 # GCP_SA_JSON is no longer used: delete it after the v2 deploy (RUNBOOK step 9).
 
-# Edge burst limiters. MUST stay after the whole [vars] block.
-# BURST: per network (IPv4, IPv6 /64, or pool + IP), never per email, so rotating emails does not reset it.
-# One token per /query call and per MCP HTTP request that contains tools/call.
-[[ratelimits]]
-name = "BURST"
-namespace_id = "1001"
-simple = { limit = 30, period = 60 }
-
-# HEALTH_BURST: /health/deep per network (the KVM2 monitor probes once a minute).
-[[ratelimits]]
-name = "HEALTH_BURST"
-namespace_id = "1002"
-simple = { limit = 10, period = 60 }
+# No [[ratelimits]] bindings: the Cloudflare BURST / HEALTH_BURST limiters never refused anything in live tests
+# (2026-10-22), so the per-minute limit now lives in src/minute.ts and the Gate DO.

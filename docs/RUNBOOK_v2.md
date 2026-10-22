@@ -145,6 +145,16 @@ Add to `~/claude/uptime/monitor/targets.json`:
 ```
 Redeploy the monitor on KVM2 (scp `targets.json` to the monitor directory, then `docker compose up -d --force-recreate`).
 
+## 12. Alert path test
+
+`POST /admin/alert-test` sends one event (kind `test`, title "ergora-specialists alert test") to uptime-hub and
+returns the hub's HTTP status. It needs the `ADMIN_TOKEN` secret (copy on Tom's Mac at `~/.ergora_mcp_admin_token`,
+mode 600); without it the path answers 404. One test a minute. `{"notify": false}` skips Telegram.
+```bash
+curl -s -X POST -H "Authorization: Bearer $(cat ~/.ergora_mcp_admin_token)" \
+  https://ergora-specialists-gateway.contact-c9e.workers.dev/admin/alert-test
+```
+
 ## Rollback
 
 `npx wrangler rollback` returns the Worker to v0.3 (KV and `ergora-kb` are untouched until step 2), but
