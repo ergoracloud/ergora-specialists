@@ -8,7 +8,7 @@
 // checks; concurrent callers get the last known result (marked stale) instead of all hitting the backends.
 import { EMBED_DIMS, num, SERVER_VERSION, type Env } from "./config";
 import { upstreamAlert } from "./alerts";
-import type { Gate } from "./gate";
+import type { Gate, MinuteCheck } from "./gate";
 import { gateStub } from "./query";
 import { embedQuery } from "./search";
 
@@ -41,11 +41,12 @@ async function timed<T>(fn: () => Promise<T>): Promise<{ ok: boolean; ms: number
   }
 }
 
-export async function deepHealth(env: Env, ctx: ExecutionContext): Promise<DeepHealth> {
+// Returns null when the caller's network is over its per-minute limit (checked in the same Gate call as the memo).
+export async function deepHealth(env: Env, ctx: ExecutionContext, minute: MinuteCheck, now = Date.now()): Promise<DeepHealth | null> {
   const gate = gateStub(env);
-  const now = Date.now();
-  const memo = await gate.memoGet("health", now);
-  if (memo) return JSON.parse(memo) as DeepHealth;
+  const peek = await gate.healthPeek(minute, now);
+  if (peek.limited) return null;
+  if (peek.memo) return JSON.parse(peek.memo) as DeepHealth;
   if (!(await gate.beginRefresh("health", now, REFRESH_CLAIM_SEC))) {
     const last = await gate.memoGet("health_last", now);
     if (last) return { ...(JSON.parse(last) as DeepHealth), stale: true };

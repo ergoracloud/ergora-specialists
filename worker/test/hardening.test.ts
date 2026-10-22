@@ -4,8 +4,9 @@
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Gate } from "../src/gate";
+import { _resetMinuteState, localMinuteOk, retryAfterSec } from "../src/minute";
 import { _resetIsolateState } from "../src/query";
-import { call, countingGate, fakeLimiter, gateOf, meta, migrate, mocks, postQuery, seedDocs, stubFetch, testEnv } from "./helpers";
+import { call, countingGate, freshWindow, gateOf, meta, migrate, mocks, postQuery, seedDocs, stubFetch, testEnv } from "./helpers";
 
 beforeAll(migrate);
 beforeEach(() => _resetIsolateState());
@@ -74,26 +75,88 @@ describe("H1: email rotation from one network", () => {
   });
 });
 
-describe("H2: burst limiter, memo and batches", () => {
-  it("keys the burst limiter on the network, never on the email", async () => {
+describe("H2: per-minute limiter, memo and batches", () => {
+  it("keys the minute limiter on the network, never on the email", async () => {
     stubFetch();
-    const { keys, limiter } = fakeLimiter();
-    const e = testEnv(mocks(), { BURST: limiter, LOOPS_CONFIRM_TEMPLATE_ID: "" });
-    for (const em of ["a@x.co", "b@x.co", "c@x.co", "d@x.co"]) await postQuery(e, { query: "q" }, { email: em, ip: "198.51.100.9" });
-    expect(new Set(keys)).toEqual(new Set(["v4:198.51.100.9"]));
-  });
-
-  it("refuses at the edge without touching the Durable Object when the burst limit trips", async () => {
-    stubFetch();
-    const m = mocks();
-    const e = testEnv(m, { BURST: fakeLimiter(() => false).limiter });
-    const g = countingGate(e);
-    e.GATE_DO = g.ns;
-    const r = await postQuery(e, { query: "q" });
+    await freshWindow();
+    const e = testEnv(mocks(), { BURST_PER_MINUTE: "3", DAILY_LIMIT: "20", MAX_EMAILS_PER_NET: "10", LOOPS_CONFIRM_TEMPLATE_ID: "" });
+    for (const em of ["a@x.co", "b@x.co", "c@x.co"]) expect((await postQuery(e, { query: em }, { email: em, ip: "198.51.100.9" })).status).toBe(200);
+    const r = await postQuery(e, { query: "d" }, { email: "d@x.co", ip: "198.51.100.9" });
     expect(r.status).toBe(429);
     expect((await body(r)).code).toBe("RATE_LIMITED");
-    expect(g.calls()).toBe(0);
-    expect(m.ai.run).not.toHaveBeenCalled();
+    // another network is unaffected
+    expect((await postQuery(e, { query: "e" }, { email: "e@x.co", ip: "198.51.100.10" })).status).toBe(200);
+  });
+
+  it("refuses from the isolate counter without touching the Durable Object, with Retry-After", async () => {
+    stubFetch();
+    await freshWindow();
+    const m = mocks();
+    const e = testEnv(m, { BURST_PER_MINUTE: "2", DAILY_LIMIT: "20" });
+    const g = countingGate(e);
+    e.GATE_DO = g.ns;
+    expect((await postQuery(e, { query: "1" }, { email: "a@x.co" })).status).toBe(200);
+    expect((await postQuery(e, { query: "2" }, { email: "a@x.co" })).status).toBe(200);
+    const r = await postQuery(e, { query: "3" }, { email: "a@x.co" });
+    expect(r.status).toBe(429);
+    expect((await body(r)).code).toBe("RATE_LIMITED");
+    const ra = Number(r.headers.get("retry-after"));
+    expect(ra).toBeGreaterThanOrEqual(1);
+    expect(ra).toBeLessThanOrEqual(60);
+    expect(g.calls()).toBe(2);
+    expect(m.ai.run).toHaveBeenCalledTimes(2);
+  });
+
+  it("the Gate counter is authoritative when requests land on different isolates", async () => {
+    stubFetch();
+    await freshWindow();
+    const e = testEnv(mocks(), { BURST_PER_MINUTE: "2", DAILY_LIMIT: "20" });
+    const g = countingGate(e);
+    e.GATE_DO = g.ns;
+    for (const q of ["1", "2"]) {
+      _resetMinuteState(); // a new isolate: no local count
+      expect((await postQuery(e, { query: q }, { email: "a@x.co" })).status).toBe(200);
+    }
+    _resetMinuteState();
+    const r = await postQuery(e, { query: "3" }, { email: "a@x.co" });
+    expect(r.status).toBe(429);
+    expect((await body(r)).code).toBe("RATE_LIMITED");
+    expect(r.headers.get("retry-after")).toMatch(/^\d+$/);
+    expect(g.calls()).toBe(3);
+    // the refusal is remembered in this isolate until the window ends
+    expect((await postQuery(e, { query: "4" }, { email: "a@x.co" })).status).toBe(429);
+    expect(g.calls()).toBe(3);
+  });
+
+  it("opens a new window every minute and refusals write nothing", async () => {
+    const e = testEnv(mocks());
+    const gate = gateOf(e);
+    const t = Math.floor(Date.now() / 60_000) * 60_000 + 1_000;
+    const lim = { key: "q|v4:192.0.2.1", limit: 2 };
+    const admit = (now: number) =>
+      gate.admit({
+        now, netKey: "v4:192.0.2.1", pooled: false, anonLimit: 100, netLimit: 100, unconfirmedNetLimit: 100, emailLimit: 100,
+        unconfirmedEmailLimit: 100, maxEmailsPerNet: 3, secondary: [], globalLimit: 100, reservePct: 0, trackUse: false, optIn: false,
+        alertPct: 80, cacheKey: `k${now}`, vectorBudget: 1000, d1RowsBudget: 1000, minute: lim,
+      });
+    expect((await admit(t)).ok).toBe(true);
+    expect((await admit(t + 10_000)).ok).toBe(true);
+    const refused = await admit(t + 20_000);
+    expect(refused).toMatchObject({ ok: false, reason: "minute" });
+    const rows = await sql(e, "SELECT n FROM counters WHERE k LIKE 'mi:%'");
+    expect(rows).toEqual([{ n: 2 }]);
+    expect((await admit(t + 60_000)).ok).toBe(true);
+  });
+
+  it("isolate counter: fixed windows, limit 0 refuses everything", () => {
+    const t = 1_700_000_040_000; // on a minute boundary
+    expect(localMinuteOk("k", 2, t)).toBe(true);
+    expect(localMinuteOk("k", 2, t + 59_000)).toBe(true);
+    expect(localMinuteOk("k", 2, t + 59_500)).toBe(false);
+    expect(localMinuteOk("k", 2, t + 60_000)).toBe(true);
+    expect(localMinuteOk("z", 0, t)).toBe(false);
+    expect(retryAfterSec(t + 59_500)).toBe(1);
+    expect(retryAfterSec(t)).toBe(60);
   });
 
   it("memoises refusals per isolate so repeat offenders stop reaching the Durable Object", async () => {
@@ -115,27 +178,29 @@ describe("H2: burst limiter, memo and batches", () => {
     expect(g.calls()).toBe(mid);
   });
 
-  it("caps MCP batches at 5 and spends one burst token per HTTP request", async () => {
+  it("caps MCP batches at 5 and spends one minute token per HTTP request", async () => {
     stubFetch();
-    const { keys, limiter } = fakeLimiter();
-    const e = testEnv(mocks(), { BURST: limiter, DAILY_LIMIT: "20", LOOPS_CONFIRM_TEMPLATE_ID: "" });
-    const batch = (n: number) =>
-      Array.from({ length: n }, (_, i) => ({ jsonrpc: "2.0", id: i + 1, method: "tools/call", params: { name: "ergora_sales", arguments: { query: `b${i}`, email: "a@x.co" } } }));
-    const big = await call(e, "/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(batch(6)) });
-    expect(big.status).toBe(400);
-    expect(keys).toHaveLength(0);
-    const ok = await call(e, "/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(batch(5)) });
+    await freshWindow();
+    const e = testEnv(mocks(), { BURST_PER_MINUTE: "2", DAILY_LIMIT: "20", LOOPS_CONFIRM_TEMPLATE_ID: "" });
+    const batch = (n: number, tag: string) =>
+      Array.from({ length: n }, (_, i) => ({ jsonrpc: "2.0", id: i + 1, method: "tools/call", params: { name: "ergora_sales", arguments: { query: `${tag}${i}`, email: "a@x.co" } } }));
+    const post = (b: unknown) => call(e, "/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b) });
+    expect((await post(batch(6, "x"))).status).toBe(400);
+    const ok = await post(batch(5, "a"));
     expect(ok.status).toBe(200);
-    expect(((await ok.json()) as unknown[]).length).toBe(5);
-    expect(keys).toHaveLength(1);
+    const out = (await ok.json()) as Array<{ result: { isError: boolean } }>;
+    expect(out.map((o) => o.result.isError)).toEqual([false, false, false, false, false]);
     // initialize and tools/list do not spend tokens
-    await call(e, "/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }) });
-    expect(keys).toHaveLength(1);
+    await post({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+    expect((await post(batch(5, "b"))).status).toBe(200);
+    const third = await post(batch(1, "c"));
+    expect(third.status).toBe(429);
+    expect(third.headers.get("retry-after")).toMatch(/^\d+$/);
   });
 
   it("answers a rate-limited MCP request with JSON-RPC errors and 429", async () => {
     stubFetch();
-    const e = testEnv(mocks(), { BURST: fakeLimiter(() => false).limiter });
+    const e = testEnv(mocks(), { BURST_PER_MINUTE: "0" });
     const r = await call(e, "/mcp", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -143,6 +208,24 @@ describe("H2: burst limiter, memo and batches", () => {
     });
     expect(r.status).toBe(429);
     expect(await r.json()).toMatchObject({ id: 7, error: { code: -32000 } });
+  });
+
+  it("an MCP batch refused by the Gate counter returns rate-limit tool errors for every call", async () => {
+    stubFetch();
+    await freshWindow();
+    const e = testEnv(mocks(), { BURST_PER_MINUTE: "1", DAILY_LIMIT: "20" });
+    const batch = (tag: string) =>
+      Array.from({ length: 2 }, (_, i) => ({ jsonrpc: "2.0", id: i + 1, method: "tools/call", params: { name: "ergora_sales", arguments: { query: `${tag}${i}`, email: "a@x.co" } } }));
+    const post = (b: unknown) => call(e, "/mcp", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(b) });
+    expect((await post(batch("a"))).status).toBe(200);
+    _resetMinuteState(); // next request lands on another isolate
+    const r = await post(batch("b"));
+    const out = (await r.json()) as Array<{ result: { isError: boolean; content: Array<{ text: string }> } }>;
+    expect(out).toHaveLength(2);
+    for (const o of out) {
+      expect(o.result.isError).toBe(true);
+      expect(o.result.content[0].text).toMatch(/Too many requests/);
+    }
   });
 });
 
@@ -270,14 +353,44 @@ describe("M2: no CORS", () => {
 });
 
 describe("L1: /health/deep", () => {
-  it("is rate limited per network", async () => {
+  it("allows 10 a minute per network, then 429 with Retry-After", async () => {
     stubFetch();
     await seedDocs([{ id: "s1", vertical: "sales", title: "t", summary: "s", source_url: "https://www.close.com/blog/x" }]);
+    await freshWindow();
     const m = mocks();
-    const e = testEnv(m, { HEALTH_BURST: fakeLimiter(() => false).limiter });
+    const e = testEnv(m);
+    const statuses: number[] = [];
+    for (let i = 0; i < 12; i++) statuses.push((await call(e, "/health/deep")).status);
+    expect(statuses).toEqual([...new Array(10).fill(200), 429, 429]);
     const r = await call(e, "/health/deep");
-    expect(r.status).toBe(429);
-    expect(m.ai.run).not.toHaveBeenCalled();
+    expect((await r.json()) as Body).toMatchObject({ code: "RATE_LIMITED" });
+    expect(Number(r.headers.get("retry-after"))).toBeGreaterThanOrEqual(1);
+    expect(m.ai.run).toHaveBeenCalledTimes(1); // memoised
+    expect((await call(e, "/health/deep", { ip: "198.51.100.77" })).status).toBe(200);
+  });
+
+  it("the Gate enforces the health limit across isolates", async () => {
+    stubFetch();
+    await seedDocs([{ id: "s1", vertical: "sales", title: "t", summary: "s", source_url: "https://www.close.com/blog/x" }]);
+    await freshWindow();
+    const e = testEnv(mocks(), { HEALTH_PER_MINUTE: "3" });
+    const statuses: number[] = [];
+    for (let i = 0; i < 4; i++) {
+      _resetMinuteState();
+      statuses.push((await call(e, "/health/deep")).status);
+    }
+    expect(statuses).toEqual([200, 200, 200, 429]);
+  });
+
+  it("never trips for the uptime monitor (one probe a minute from one IP)", async () => {
+    const e = testEnv(mocks());
+    const gate = gateOf(e);
+    const t0 = Math.floor(Date.now() / 60_000) * 60_000;
+    for (let i = 0; i < 30; i++) {
+      // worst case: the probe lands right at the end of one window and the start of the next
+      const at = t0 + i * 60_000 + (i % 2 ? 59_900 : 100);
+      expect((await gate.healthPeek({ key: "h|v4:187.124.209.30", limit: 10 }, at)).limited).toBe(false);
+    }
   });
 
   it("serves the last result while another caller is refreshing", async () => {

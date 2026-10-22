@@ -1,14 +1,16 @@
 // Core query, shared by POST /query and the MCP tools.
-// Order (cheapest first): validate -> BURST edge limiter (always keyed on the network, never on the email, so
-// rotating emails does not reset it) -> per-isolate rejection memo (cap hit, network or email already refused, so
-// repeat offenders never reach the Durable Object) -> Gate.admit (global cap and reserve, network, unconfirmed,
-// /48 + ASN, distinct-email and email quotas, cache, Vectorize budget) -> semantic search -> keyword fallback.
+// Order (cheapest first): validate -> per-minute limiter, isolate-local layer (always keyed on the network, never on
+// the email, so rotating emails does not reset it) -> per-isolate rejection memo (cap hit, network or email already
+// refused, so repeat offenders never reach the Durable Object) -> Gate.admit (authoritative per-minute counter first,
+// then global cap and reserve, network, unconfirmed, /48 + ASN, distinct-email and email quotas, cache, Vectorize
+// budget) -> semantic search -> keyword fallback.
 import { attributionUrl, LIMITS, num, VERTICALS, type Env } from "./config";
 import { deliverAlerts, upstreamAlert } from "./alerts";
 import { publicError, STATUS, type PublicCode, type PublicError } from "./errors";
 import type { Gate } from "./gate";
 import { utcDay } from "./gate";
 import { confirmationConfigured, startConfirmation } from "./leads";
+import { _resetMinuteState, blockLocal, localMinuteOk, retryAfterSec, type MinuteToken } from "./minute";
 import { identify, type Caller } from "./net";
 import type { PublicResult } from "./policy";
 import { cacheKey, keywordSearch, semanticSearch, UpstreamError } from "./search";
@@ -21,7 +23,7 @@ export interface QueryOk {
   meta: { vertical: string | null; count: number; remaining_today: number; identity: Caller["kind"]; mode: Mode };
 }
 
-export type QueryOutcome = { status: 200; body: QueryOk } | { status: number; body: PublicError };
+export type QueryOutcome = { status: 200; body: QueryOk } | { status: number; body: PublicError; retryAfter?: number };
 
 export interface QueryInput {
   query: unknown;
@@ -34,8 +36,8 @@ export interface QueryInput {
   /** explicit opt-in to the confirmation email */
   optIn?: boolean;
   base: string;
-  /** the caller (MCP batch) already spent a BURST token for this HTTP request */
-  burstChecked?: boolean;
+  /** the minute token of this HTTP request (MCP: shared by the batch, local check already done). Absent: /query */
+  minute?: MinuteToken;
 }
 
 // Per-isolate memos so refused callers do not reach the Durable Object again:
@@ -56,6 +58,7 @@ export const _resetIsolateState = () => {
   refused.clear();
   confirmedEmails.clear();
   seenOnNet.clear();
+  _resetMinuteState();
 };
 const endOfUtcDay = (now: number) => Math.floor(now / 86_400_000) * 86_400_000 + 86_400_000;
 function remember(key: string, until: number): void {
@@ -70,16 +73,16 @@ function isRefused(key: string, now: number): boolean {
   return false;
 }
 
-// Spends one BURST token for this caller's network. Shared by /query, MCP (once per HTTP request) and /health/deep.
-export async function burstOk(limiter: RateLimit | undefined, key: string): Promise<boolean> {
-  if (!limiter) return true;
-  try {
-    return (await limiter.limit({ key })).success;
-  } catch (e) {
-    // Fail open: the limiter is a best-effort edge guard and the Gate still enforces the daily quotas. Log so a broken binding is visible.
-    console.error("burst limiter error:", (e as Error)?.name, (e as Error)?.message);
-    return true;
-  }
+export const burstLimit = (env: Env) => num(env, "BURST_PER_MINUTE", 30);
+export const healthLimit = (env: Env) => num(env, "HEALTH_PER_MINUTE", 10);
+
+// Opens the minute token for one HTTP request (/query, or an MCP request that contains tools/call): the
+// isolate-local check runs here; the Gate checks the authoritative counter on the request's first admit.
+export function openMinute(env: Env, burstKey: string, now: number): MinuteToken {
+  const limit = burstLimit(env);
+  const key = `q|${burstKey}`;
+  if (!localMinuteOk(key, limit, now)) return { state: "limited", key, limit, retryAfter: retryAfterSec(now) };
+  return { state: "pending", key, limit };
 }
 
 export const gateStub = (env: Env): DurableObjectStub<Gate> => env.GATE_DO.get(env.GATE_DO.idFromName(env.GATE_NAME || "gate"));
@@ -87,6 +90,10 @@ export const gateStub = (env: Env): DurableObjectStub<Gate> => env.GATE_DO.get(e
 const fail = (env: Env, code: PublicCode, extra?: { limit?: number; kind?: string }): QueryOutcome => ({
   status: STATUS[code],
   body: publicError(env, code, extra),
+});
+const rateLimited = (env: Env, now: number, t: MinuteToken): QueryOutcome => ({
+  ...fail(env, "RATE_LIMITED"),
+  retryAfter: t.retryAfter ?? retryAfterSec(now),
 });
 
 export async function runQuery(env: Env, ctx: ExecutionContext, input: QueryInput): Promise<QueryOutcome> {
@@ -104,7 +111,8 @@ export async function runQuery(env: Env, ctx: ExecutionContext, input: QueryInpu
   if (capHitDay === today) return fail(env, "SERVICE_DAILY_LIMIT");
 
   const caller = identify(env, input.email, input.ip, input.asn);
-  if (!input.burstChecked && !(await burstOk(env.BURST, caller.burstKey))) return fail(env, "RATE_LIMITED");
+  const minute = input.minute ?? openMinute(env, caller.burstKey, now);
+  if (minute.state === "limited") return rateLimited(env, now, minute);
 
   // Refuse from the memo where the Gate would refuse anyway.
   const known = caller.emailKey ? confirmedEmails.has(caller.emailKey) : false;
@@ -142,7 +150,9 @@ export async function runQuery(env: Env, ctx: ExecutionContext, input: QueryInpu
     cacheKey: key,
     vectorBudget: num(env, "VECTORIZE_MONTHLY_QUERY_BUDGET", 66000),
     d1RowsBudget: num(env, "D1_DAILY_ROWS_READ_BUDGET", 4_000_000),
+    minute: minute.state === "pending" ? { key: minute.key, limit: minute.limit } : undefined,
   });
+  if (minute.state === "pending") minute.state = adm.reason === "minute" ? "limited" : "spent";
   if (adm.alerts.length) ctx.waitUntil(deliverAlerts(env, gate, adm.alerts, now));
   if (caller.emailKey && adm.confirmed) {
     if (confirmedEmails.size >= MEMO_MAX) confirmedEmails.clear();
@@ -151,6 +161,10 @@ export async function runQuery(env: Env, ctx: ExecutionContext, input: QueryInpu
   if (!adm.ok) {
     const eod = endOfUtcDay(now);
     switch (adm.reason) {
+      case "minute":
+        blockLocal(minute.key, minute.limit, now);
+        minute.retryAfter = retryAfterSec(now);
+        return rateLimited(env, now, minute);
       case "global":
         capHitDay = today;
         return fail(env, "SERVICE_DAILY_LIMIT");

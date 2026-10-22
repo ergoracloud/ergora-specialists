@@ -17,10 +17,11 @@ export interface HubEvent {
   dedupe_window_sec: number;
 }
 
-export async function postHub(env: Env, ev: HubEvent): Promise<boolean> {
+// Posts one event to the hub. Returns the hub's HTTP status, 0 when it was unreachable, or null when no token is set.
+export async function sendHub(env: Env, ev: HubEvent): Promise<number | null> {
   if (!env.UPTIME_HUB_TOKEN) {
     console.warn("alert not sent (UPTIME_HUB_TOKEN unset):", ev.kind, ev.title);
-    return false;
+    return null;
   }
   const url = `${(env.UPTIME_HUB_URL || DEFAULT_HUB).replace(/\/+$/, "")}/v1/events`;
   try {
@@ -31,11 +32,16 @@ export async function postHub(env: Env, ev: HubEvent): Promise<boolean> {
       signal: AbortSignal.timeout(5000),
     });
     if (!res.ok) console.error("uptime hub rejected alert:", res.status);
-    return res.ok;
+    return res.status;
   } catch (e) {
     console.error("uptime hub unreachable:", (e as Error)?.name);
-    return false;
+    return 0;
   }
+}
+
+export async function postHub(env: Env, ev: HubEvent): Promise<boolean> {
+  const status = await sendHub(env, ev);
+  return status !== null && status >= 200 && status < 300;
 }
 
 export function capEvent(env: Env, kind: AlertKind, now: number): HubEvent {

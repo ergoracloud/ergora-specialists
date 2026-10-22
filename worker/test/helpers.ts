@@ -78,11 +78,10 @@ export function postQuery(e: Env, body: Record<string, unknown>, opts: { ip?: st
   return call(e, "/query", { method: "POST", body: JSON.stringify(body), headers, ip: opts.ip, asn: opts.asn });
 }
 
-// A BURST stand-in that records keys and can be told to refuse.
-export function fakeLimiter(allow: (key: string) => boolean = () => true) {
-  const keys: string[] = [];
-  const limiter = { limit: vi.fn(async ({ key }: { key: string }) => { keys.push(key); return { success: allow(key) }; }) };
-  return { keys, limiter: limiter as unknown as RateLimit };
+// Waits for a new minute window when the current one is about to end, so a burst test stays in one window.
+export async function freshWindow(marginMs = 5_000): Promise<void> {
+  const left = 60_000 - (Date.now() % 60_000);
+  if (left < marginMs) await new Promise((r) => setTimeout(r, left + 50));
 }
 
 // Wraps the Gate namespace so a test can count how many requests reached the Durable Object.
